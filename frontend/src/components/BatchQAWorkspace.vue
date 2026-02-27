@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch, onUnmounted } from "vue";
+import { computed, ref, watch, onMounted, onUnmounted } from "vue";
 import { Files, ListChecks, UploadCloud } from "lucide-vue-next";
+import { toast } from "vue-sonner";
 import AudioUploader from "./AudioUploader.vue";
 import TranscriptViewer from "./TranscriptViewer.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
@@ -9,8 +10,12 @@ import {
   createBatch,
   getBatch,
   getJob,
+  listProjects,
+  listTenants,
   subscribeBatch,
   subscribeJob,
+  type Project,
+  type Tenant,
 } from "../services/backendApi";
 import { useSession } from "../services/session";
 
@@ -75,10 +80,18 @@ let pollTimer: number | null = null;
 const session = useSession();
 const tenantId = computed(() => session.tenantId.value || "");
 const projectId = computed(() => session.projectId.value || "");
+const tenants = ref<Tenant[]>([]);
+const projects = ref<Project[]>([]);
+const isLoadingScope = ref(false);
+const scopeError = ref("");
 
 const selectedItem = computed(
   () => items.value.find((item) => item.id === selectedItemId.value) ?? null,
 );
+const selectedProject = computed(
+  () => projects.value.find((project) => project.id === projectId.value) ?? null,
+);
+const canRunBatch = computed(() => !!tenantId.value && !!projectId.value && hasApiKeys);
 const detectedNceParameterCount = computed(() => {
   const completedWithAnalysis = items.value.find(
     (item) => item.status === "completed" && item.analysis,
@@ -139,6 +152,58 @@ const statusLabel: Record<BatchStatus, string> = {
   analyzing: "Analyzing",
   completed: "Completed",
   failed: "Failed",
+};
+
+const loadTenantsForBatch = async () => {
+  tenants.value = await listTenants();
+};
+
+const loadProjectsForBatchTenant = async (id: string) => {
+  if (!id) {
+    projects.value = [];
+    return;
+  }
+  projects.value = await listProjects(id);
+};
+
+const initializeBatchScope = async () => {
+  if (!hasApiKeys) return;
+  isLoadingScope.value = true;
+  scopeError.value = "";
+  try {
+    await loadTenantsForBatch();
+    if (tenantId.value && tenants.value.some((tenant) => tenant.id === tenantId.value)) {
+      await loadProjectsForBatchTenant(tenantId.value);
+      if (projectId.value && !projects.value.some((project) => project.id === projectId.value)) {
+        session.setProjectId("");
+      }
+      return;
+    }
+    session.setTenantId("");
+    session.setProjectId("");
+    projects.value = [];
+  } catch (error) {
+    scopeError.value = error instanceof Error ? error.message : "Failed to load tenant/project options";
+  } finally {
+    isLoadingScope.value = false;
+  }
+};
+
+const onTenantChange = async (event: Event) => {
+  const nextTenant = String((event.target as HTMLSelectElement).value || "");
+  session.setTenantId(nextTenant);
+  session.setProjectId("");
+  scopeError.value = "";
+  try {
+    await loadProjectsForBatchTenant(nextTenant);
+  } catch (error) {
+    scopeError.value = error instanceof Error ? error.message : "Failed to load projects";
+  }
+};
+
+const onProjectChange = (event: Event) => {
+  const nextProject = String((event.target as HTMLSelectElement).value || "");
+  session.setProjectId(nextProject);
 };
 
 watch(
@@ -278,7 +343,11 @@ const startRealtime = () => {
 
 const handleFilesSelect = (files: File[]) => {
   if (!hasApiKeys) {
-    alert("Missing backend config/token. Configure frontend env first.");
+    toast.error("Missing backend config/token. Configure frontend env first.");
+    return;
+  }
+  if (!tenantId.value || !projectId.value) {
+    toast.error("Select tenant and project first.");
     return;
   }
   if (!files.length) return;
@@ -290,7 +359,16 @@ const startBatchRun = async () => {
   if (!hasApiKeys) return;
   if (!pendingFiles.value.length) return;
   if (!tenantId.value || !projectId.value) {
-    alert("Select tenant and project from Manage page first.");
+    toast.error("Select tenant and project first.");
+    return;
+  }
+  const activeProject = selectedProject.value;
+  if (
+    activeProject &&
+    ((batchCallType.value === "inbound" && !activeProject.supportsInbound) ||
+      (batchCallType.value === "outbound" && !activeProject.supportsOutbound))
+  ) {
+    toast.error("Selected project does not support this call type.");
     return;
   }
 
@@ -332,10 +410,29 @@ const startBatchRun = async () => {
     startRealtime();
   } catch (error) {
     console.error(error);
-    alert("Failed to start batch processing. See console.");
+    toast.error("Failed to start batch processing.");
     isRunning.value = false;
   }
 };
+
+watch(
+  selectedProject,
+  (project) => {
+    if (!project) return;
+    if (batchCallType.value === "inbound" && !project.supportsInbound && project.supportsOutbound) {
+      batchCallType.value = "outbound";
+      return;
+    }
+    if (batchCallType.value === "outbound" && !project.supportsOutbound && project.supportsInbound) {
+      batchCallType.value = "inbound";
+    }
+  },
+  { immediate: true },
+);
+
+onMounted(async () => {
+  await initializeBatchScope();
+});
 
 onUnmounted(() => {
   stopRealtime();
@@ -353,6 +450,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-3">
         <AudioUploader
           :is-processing="isRunning"
+          :disabled="!canRunBatch"
           :multiple="true"
           button-label="Upload Batch Recordings"
           @files-selected="handleFilesSelect"
@@ -360,10 +458,50 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+      <label class="space-y-1 text-xs text-slate-300">
+        <span class="uppercase tracking-[0.18em] text-slate-400">Tenant</span>
+        <select
+          class="w-full rounded-lg border border-slate-700/60 bg-slate-900/50 px-3 py-2 text-sm text-slate-100"
+          :value="tenantId"
+          @change="onTenantChange"
+          :disabled="isLoadingScope || !hasApiKeys"
+        >
+          <option value="">Select tenant</option>
+          <option v-for="tenant in tenants" :key="tenant.id" :value="tenant.id">
+            {{ tenant.name }}
+          </option>
+        </select>
+      </label>
+      <label class="space-y-1 text-xs text-slate-300">
+        <span class="uppercase tracking-[0.18em] text-slate-400">Project</span>
+        <select
+          class="w-full rounded-lg border border-slate-700/60 bg-slate-900/50 px-3 py-2 text-sm text-slate-100"
+          :value="projectId"
+          @change="onProjectChange"
+          :disabled="isLoadingScope || !tenantId || !hasApiKeys"
+        >
+          <option value="">Select project</option>
+          <option v-for="project in projects" :key="project.id" :value="project.id">
+            {{ project.name }}
+          </option>
+        </select>
+      </label>
+    </div>
+
+    <p v-if="scopeError" class="mb-4 text-xs text-rose-300">{{ scopeError }}</p>
+    <p
+      v-else-if="hasApiKeys && (!tenantId || !projectId)"
+      class="mb-4 text-xs text-amber-200/80"
+    >
+      Select tenant and project to enable batch upload.
+    </p>
+
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
       <button
         type="button"
         class="px-3 py-2 rounded-lg border text-sm font-medium"
+        :disabled="!!selectedProject && !selectedProject.supportsInbound"
         :class="
           batchCallType === 'inbound'
             ? 'bg-cyan-950/40 border-cyan-400/60 text-cyan-200'
@@ -376,6 +514,7 @@ onUnmounted(() => {
       <button
         type="button"
         class="px-3 py-2 rounded-lg border text-sm font-medium"
+        :disabled="!!selectedProject && !selectedProject.supportsOutbound"
         :class="
           batchCallType === 'outbound'
             ? 'bg-cyan-950/40 border-cyan-400/60 text-cyan-200'
@@ -389,7 +528,7 @@ onUnmounted(() => {
 
     <div v-if="!hasApiKeys" class="rounded-xl border border-amber-300/40 bg-amber-300/12 p-4 mb-4">
       <h3 class="text-amber-200 font-semibold mb-1">Missing Backend Config</h3>
-      <p class="text-sm text-amber-200/70">Login first and pick active tenant/project in Manage page.</p>
+      <p class="text-sm text-amber-200/70">Login first and configure frontend/backend env.</p>
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">

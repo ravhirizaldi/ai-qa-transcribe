@@ -17,7 +17,22 @@ const withAuth = (headers: Record<string, string> = {}) => {
 const parse = async <T>(response: Response): Promise<T> => {
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(body || `Request failed with ${response.status}`);
+    let message = `Request failed with ${response.status}`;
+
+    if (body) {
+      try {
+        const parsed = JSON.parse(body) as { message?: unknown };
+        if (typeof parsed?.message === "string" && parsed.message.trim()) {
+          message = parsed.message;
+        } else {
+          message = body;
+        }
+      } catch {
+        message = body;
+      }
+    }
+
+    throw new Error(message);
   }
   return response.json() as Promise<T>;
 };
@@ -28,7 +43,9 @@ export const register = async (email: string, password: string) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string } }>(response);
+  return parse<{ token: string; user: { id: string; email: string } }>(
+    response,
+  );
 };
 
 export const login = async (email: string, password: string) => {
@@ -37,7 +54,9 @@ export const login = async (email: string, password: string) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string } }>(response);
+  return parse<{ token: string; user: { id: string; email: string } }>(
+    response,
+  );
 };
 
 export type Tenant = {
@@ -55,12 +74,53 @@ export type Project = {
   supportsOutbound: boolean;
 };
 
+export type BatchHistoryItem = {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  callType: "inbound" | "outbound";
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+};
+
+export type MatrixCallType = "inbound" | "outbound";
+
+export type MatrixRow = {
+  id?: string;
+  rowIndex?: number;
+  area: string;
+  parameter: string;
+  description: string;
+  weight: number;
+};
+
+export type MatrixVersion = {
+  id: string;
+  projectId: string;
+  callType: MatrixCallType;
+  versionNumber: number;
+  isActive: boolean;
+  createdBy: string;
+  createdAt: string;
+};
+
+export type MatrixVersionDetail = MatrixVersion & {
+  rows: MatrixRow[];
+};
+
 export const listTenants = async () => {
   const response = await fetch(`${API_BASE}/tenants`, { headers: withAuth() });
   return parse<Tenant[]>(response);
 };
 
-export const createTenant = async (payload: { name: string; logoUrl?: string | null }) => {
+export const createTenant = async (payload: {
+  name: string;
+  logoUrl?: string | null;
+}) => {
   const response = await fetch(`${API_BASE}/tenants`, {
     method: "POST",
     headers: withAuth({ "Content-Type": "application/json" }),
@@ -98,7 +158,11 @@ export const listProjects = async (tenantId: string) => {
 
 export const createProject = async (
   tenantId: string,
-  payload: { name: string; supportsInbound: boolean; supportsOutbound: boolean },
+  payload: {
+    name: string;
+    supportsInbound: boolean;
+    supportsOutbound: boolean;
+  },
 ) => {
   const response = await fetch(`${API_BASE}/tenants/${tenantId}/projects`, {
     method: "POST",
@@ -111,21 +175,134 @@ export const createProject = async (
 export const updateProject = async (
   tenantId: string,
   projectId: string,
-  payload: { name?: string; supportsInbound?: boolean; supportsOutbound?: boolean },
+  payload: {
+    name?: string;
+    supportsInbound?: boolean;
+    supportsOutbound?: boolean;
+  },
 ) => {
-  const response = await fetch(`${API_BASE}/tenants/${tenantId}/projects/${projectId}`, {
-    method: "PATCH",
-    headers: withAuth({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}`,
+    {
+      method: "PATCH",
+      headers: withAuth({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    },
+  );
   return parse<Project>(response);
 };
 
 export const deleteProject = async (tenantId: string, projectId: string) => {
-  const response = await fetch(`${API_BASE}/tenants/${tenantId}/projects/${projectId}`, {
-    method: "DELETE",
-    headers: withAuth(),
-  });
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}`,
+    {
+      method: "DELETE",
+      headers: withAuth(),
+    },
+  );
+  return parse<{ ok: boolean }>(response);
+};
+
+export const listMatrixVersions = async (
+  projectId: string,
+  callType: MatrixCallType,
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<MatrixVersion[]>(response);
+};
+
+export const getActiveMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/active`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<MatrixVersionDetail>(response);
+};
+
+export const getMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+  versionId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions/${versionId}`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<MatrixVersionDetail>(response);
+};
+
+export const createMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+  rows: MatrixRow[],
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions`,
+    {
+      method: "POST",
+      headers: withAuth({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ rows }),
+    },
+  );
+  return parse<MatrixVersion>(response);
+};
+
+export const updateMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+  versionId: string,
+  rows: MatrixRow[],
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions/${versionId}`,
+    {
+      method: "PUT",
+      headers: withAuth({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ rows }),
+    },
+  );
+  return parse<{ ok: boolean }>(response);
+};
+
+export const activateMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+  versionId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions/${versionId}/activate`,
+    {
+      method: "POST",
+      headers: withAuth(),
+    },
+  );
+  return parse<{ ok: boolean }>(response);
+};
+
+export const deleteMatrixVersion = async (
+  projectId: string,
+  callType: MatrixCallType,
+  versionId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/matrices/${callType}/versions/${versionId}`,
+    {
+      method: "DELETE",
+      headers: withAuth(),
+    },
+  );
   return parse<{ ok: boolean }>(response);
 };
 
@@ -133,9 +310,11 @@ export const getGlobalSettings = async () => {
   const response = await fetch(`${API_BASE}/settings/global`, {
     headers: withAuth(),
   });
-  return parse<{ hasElevenlabsApiKey: boolean; hasXaiApiKey: boolean; xaiModel: string }>(
-    response,
-  );
+  return parse<{
+    hasElevenlabsApiKey: boolean;
+    hasXaiApiKey: boolean;
+    xaiModel: string;
+  }>(response);
 };
 
 export const updateGlobalSettings = async (payload: {
@@ -179,6 +358,79 @@ export const createBatch = async (payload: {
   return parse<{ batchId: string; jobIds: string[] }>(response);
 };
 
+export const listProjectBatches = async (projectId: string) => {
+  const response = await fetch(`${API_BASE}/projects/${projectId}/batches`, {
+    headers: withAuth(),
+  });
+  return parse<BatchHistoryItem[]>(response);
+};
+
+export const createProjectBatch = async (payload: {
+  tenantId: string;
+  projectId: string;
+  callType: "inbound" | "outbound";
+  name?: string;
+}) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${payload.projectId}/batches`,
+    {
+      method: "POST",
+      headers: withAuth({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        tenantId: payload.tenantId,
+        callType: payload.callType,
+        name: payload.name,
+      }),
+    },
+  );
+  return parse<{
+    id: string;
+    tenantId: string;
+    projectId: string;
+    callType: "inbound" | "outbound";
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+  }>(response);
+};
+
+export const uploadBatchFiles = async (payload: {
+  batchId: string;
+  files: File[];
+  analyzeNow: boolean;
+}) => {
+  const form = new FormData();
+  for (const file of payload.files) {
+    form.append("files", file);
+  }
+  form.append("analyzeNow", String(payload.analyzeNow));
+
+  const response = await fetch(`${API_BASE}/batches/${payload.batchId}/files`, {
+    method: "POST",
+    headers: withAuth(),
+    body: form,
+  });
+  return parse<{ batchId: string; jobIds: string[]; analyzeNow: boolean }>(
+    response,
+  );
+};
+
+export const analyzeBatchNow = async (batchId: string) => {
+  const response = await fetch(`${API_BASE}/batches/${batchId}/analyze`, {
+    method: "POST",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean; enqueued: number }>(response);
+};
+
+export const deleteBatch = async (batchId: string) => {
+  const response = await fetch(`${API_BASE}/batches/${batchId}`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
 export const getBatch = async (batchId: string) => {
   const response = await fetch(`${API_BASE}/batches/${batchId}`, {
     headers: withAuth(),
@@ -193,7 +445,33 @@ export const getJob = async (jobId: string) => {
   return parse<any>(response);
 };
 
-export const connectWs = (onEvent: (event: Record<string, unknown>) => void) => {
+export const getJobAudioUrl = (jobId: string) => {
+  const token = getToken();
+  if (!token) {
+    throw new Error("Missing auth token.");
+  }
+  return `${API_BASE}/jobs/${jobId}/audio?token=${encodeURIComponent(token)}`;
+};
+
+export const deleteJob = async (jobId: string) => {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
+export const retryJob = async (jobId: string) => {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/retry`, {
+    method: "POST",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
+export const connectWs = (
+  onEvent: (event: Record<string, unknown>) => void,
+) => {
   const token = getToken();
   if (!token) {
     throw new Error("Missing auth token for websocket connection");

@@ -25,8 +25,6 @@ import {
   listAccessibleTenants,
 } from "../repos/access.js";
 import { toSlug } from "../utils/slug.js";
-import inboundMatrix from "../data/inbound.json";
-import outboundMatrix from "../data/outbound.json";
 
 const CreateTenantSchema = z.object({
   name: z.string().min(2),
@@ -232,40 +230,6 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           supportsOutbound: payload.supportsOutbound,
         })
         .returning();
-
-      const seedVersion = async (
-        callType: "inbound" | "outbound",
-        rows: Array<{ area: string; parameter: string; description: string; weight: number }>,
-      ) => {
-        const [version] = await db
-          .insert(projectMatrixVersions)
-          .values({
-            projectId: project.id,
-            callType,
-            versionNumber: 1,
-            isActive: true,
-            createdBy: (request.user as any).sub,
-          })
-          .returning();
-
-        await db.insert(projectMatrixRows).values(
-          rows.map((row, idx) => ({
-            matrixVersionId: version.id,
-            rowIndex: idx,
-            area: row.area,
-            parameter: row.parameter,
-            description: row.description,
-            weight: row.weight,
-          })),
-        );
-      };
-
-      if (payload.supportsInbound) {
-        await seedVersion("inbound", inboundMatrix);
-      }
-      if (payload.supportsOutbound) {
-        await seedVersion("outbound", outboundMatrix);
-      }
 
       return project;
     },
@@ -493,6 +457,23 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         columns: { id: true },
       });
       const tenantProjectIds = tenantProjects.map((project) => project.id);
+      const requestedProjectIds = [...new Set(body.projectIds)];
+
+      if (requestedProjectIds.length) {
+        const validProjects = await db.query.projects.findMany({
+          where: and(
+            eq(projects.tenantId, params.tenantId),
+            inArray(projects.id, requestedProjectIds),
+          ),
+          columns: { id: true },
+        });
+
+        if (validProjects.length !== requestedProjectIds.length) {
+          return reply
+            .code(400)
+            .send({ message: "One or more projectIds do not belong to the tenant" });
+        }
+      }
 
       if (tenantProjectIds.length) {
         await db.delete(projectMemberships).where(
@@ -503,9 +484,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         );
       }
 
-      if (body.projectIds.length) {
+      if (requestedProjectIds.length) {
         await db.insert(projectMemberships).values(
-          body.projectIds.map((projectId) => ({
+          requestedProjectIds.map((projectId) => ({
             projectId,
             userId: params.userId,
           })),

@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import ivrFiltersConfig from "../data/ivr_filters.json";
+import { logProviderError, logProviderEvent } from "./providerLogs.js";
 
 const ivrFilters = Object.values(ivrFiltersConfig).flat() as string[];
 
@@ -39,20 +40,53 @@ export type RawSegment = {
   words: unknown[];
 };
 
-export const transcribeAudioFile = async (filePath: string, apiKey: string) => {
-  const elevenlabs = new ElevenLabsClient({ apiKey });
-  const stream = createReadStream(filePath);
-  const transcription = await elevenlabs.speechToText.convert({
-    file: stream as any,
+export const transcribeAudioFile = async (
+  filePath: string,
+  apiKey: string,
+  context?: { jobId?: string; batchId?: string },
+) => {
+  const startedAt = Date.now();
+  logProviderEvent("info", "elevenlabs.transcribe.request", {
+    provider: "elevenlabs",
+    endpoint: "speech-to-text.convert",
     modelId: "scribe_v2",
-    tagAudioEvents: false,
-    useMultiChannel: false,
-    diarize: true,
-    timestampsGranularity: "word",
-    languageCode: "ind",
-    numSpeakers: 2,
-    temperature: 0.2,
+    filePath,
+    jobId: context?.jobId,
+    batchId: context?.batchId,
   });
+
+  const elevenlabs = new ElevenLabsClient({ apiKey });
+  let transcription: any;
+
+  try {
+    const stream = createReadStream(filePath);
+    transcription = await elevenlabs.speechToText.convert({
+      file: stream as any,
+      modelId: "scribe_v2",
+      tagAudioEvents: false,
+      useMultiChannel: false,
+      diarize: true,
+      timestampsGranularity: "word",
+      languageCode: "ind",
+      numSpeakers: 2,
+      temperature: 0.2,
+    });
+  } catch (error) {
+    logProviderError(
+      "elevenlabs.transcribe.failed",
+      {
+        provider: "elevenlabs",
+        endpoint: "speech-to-text.convert",
+        modelId: "scribe_v2",
+        filePath,
+        jobId: context?.jobId,
+        batchId: context?.batchId,
+        durationMs: Date.now() - startedAt,
+      },
+      error,
+    );
+    throw error;
+  }
 
   const allWords: any[] = [];
 
@@ -121,6 +155,18 @@ export const transcribeAudioFile = async (filePath: string, apiKey: string) => {
       return { ...seg, text: cleanedText };
     })
     .filter((seg) => seg.text.length > 0);
+
+  logProviderEvent("info", "elevenlabs.transcribe.success", {
+    provider: "elevenlabs",
+    endpoint: "speech-to-text.convert",
+    modelId: "scribe_v2",
+    filePath,
+    jobId: context?.jobId,
+    batchId: context?.batchId,
+    durationMs: Date.now() - startedAt,
+    totalSegments: cleanedSegments.length,
+    totalWords: allWords.length,
+  });
 
   return {
     text: cleanedSegments.map((seg) => seg.text).join(" "),

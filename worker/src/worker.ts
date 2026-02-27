@@ -1,5 +1,8 @@
 import { and, eq } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { db, pool } from "./db.js";
 import { env } from "./config.js";
 import {
@@ -23,6 +26,32 @@ const QUEUES = {
 } as const;
 
 const boss = new PgBoss({ connectionString: env.DATABASE_URL });
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+
+const extractJobIdFromPayload = (payload: unknown): string | null => {
+  const jobLike = Array.isArray(payload) ? payload[0] : payload;
+  const data = (jobLike as any)?.data;
+  const raw = data?.jobId;
+  if (!raw) return null;
+  return String(raw);
+};
+
+const resolveJobFilePath = (rawPath: string) => {
+  if (isAbsolute(rawPath)) return rawPath;
+
+  const candidates = [
+    resolve(process.cwd(), rawPath),
+    resolve(moduleDir, "../", rawPath),
+    resolve(moduleDir, "../../backend", rawPath),
+    resolve(moduleDir, "../../", rawPath),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  return resolve(process.cwd(), rawPath);
+};
 
 const emitWsEvent = async (event: Record<string, unknown>) => {
   await boss.send(QUEUES.WS_EVENTS, event);
@@ -146,8 +175,11 @@ const start = async () => {
   await boss.createQueue(QUEUES.FINALIZE);
   await boss.createQueue(QUEUES.WS_EVENTS);
 
-  await boss.work(QUEUES.TRANSCRIBE, async (job: any) => {
-    const jobId = String(job.data.jobId);
+  await boss.work(QUEUES.TRANSCRIBE, async (payload: any) => {
+    const jobId = extractJobIdFromPayload(payload);
+    if (!jobId) {
+      throw new Error("Invalid transcribe payload: missing jobId");
+    }
 
     try {
       const current = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
@@ -156,7 +188,11 @@ const start = async () => {
       const provider = await getProviderConfig();
 
       await updateJobStatus(jobId, "transcribing", 35);
-      const transcription = await transcribeAudioFile(current.filePath, provider.elevenlabsApiKey);
+      const filePath = resolveJobFilePath(current.filePath);
+      const transcription = await transcribeAudioFile(filePath, provider.elevenlabsApiKey, {
+        jobId,
+        batchId: current.batchId,
+      });
 
       await db.insert(jobTranscripts).values({
         jobId,
@@ -186,12 +222,16 @@ const start = async () => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Transcription failed";
       await updateJobStatus(jobId, "failed", 100, message);
-      throw error;
+      // Keep failed state final; manual retry is handled by API/UI.
+      return;
     }
   });
 
-  await boss.work(QUEUES.ANALYZE, async (job: any) => {
-    const jobId = String(job.data.jobId);
+  await boss.work(QUEUES.ANALYZE, async (payload: any) => {
+    const jobId = extractJobIdFromPayload(payload);
+    if (!jobId) {
+      throw new Error("Invalid analyze payload: missing jobId");
+    }
 
     try {
       const current = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
@@ -228,6 +268,7 @@ const start = async () => {
         })),
         provider.xaiApiKey,
         provider.xaiModel,
+        { jobId, batchId: current.batchId },
       );
 
       for (let idx = 0; idx < segments.length; idx++) {
@@ -275,12 +316,16 @@ const start = async () => {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Analysis failed";
       await updateJobStatus(jobId, "failed", 100, message);
-      throw error;
+      // Keep failed state final; manual retry is handled by API/UI.
+      return;
     }
   });
 
-  await boss.work(QUEUES.FINALIZE, async (job: any) => {
-    const jobId = String(job.data.jobId);
+  await boss.work(QUEUES.FINALIZE, async (payload: any) => {
+    const jobId = extractJobIdFromPayload(payload);
+    if (!jobId) {
+      throw new Error("Invalid finalize payload: missing jobId");
+    }
     const current = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
     if (!current) return;
 

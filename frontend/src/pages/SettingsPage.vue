@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { toast } from "vue-sonner";
 import { getGlobalSettings, updateGlobalSettings } from "../services/backendApi";
 
 const elevenlabsApiKey = ref("");
@@ -10,20 +11,20 @@ const hasElevenlabs = ref(false);
 const hasXai = ref(false);
 
 const isSavingGlobal = ref(false);
-const message = ref("");
 
 const load = async () => {
-  message.value = "";
-
-  const global = await getGlobalSettings();
-  hasElevenlabs.value = global.hasElevenlabsApiKey;
-  hasXai.value = global.hasXaiApiKey;
-  xaiModel.value = global.xaiModel;
+  try {
+    const global = await getGlobalSettings();
+    hasElevenlabs.value = global.hasElevenlabsApiKey;
+    hasXai.value = global.hasXaiApiKey;
+    xaiModel.value = global.xaiModel;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to load global settings");
+  }
 };
 
 const saveGlobalSettings = async () => {
   isSavingGlobal.value = true;
-  message.value = "";
 
   try {
     const result = await updateGlobalSettings({
@@ -37,9 +38,9 @@ const saveGlobalSettings = async () => {
     xaiModel.value = result.xaiModel;
     elevenlabsApiKey.value = "";
     xaiApiKey.value = "";
-    message.value = "Global provider settings saved.";
+    toast.success("Global provider settings saved");
   } catch (error) {
-    message.value = error instanceof Error ? error.message : "Failed to save global settings";
+    toast.error(error instanceof Error ? error.message : "Failed to save global settings");
   } finally {
     isSavingGlobal.value = false;
   }
@@ -51,45 +52,63 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="max-w-3xl rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-6">
+  <section class="max-w-5xl rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-4">
     <p class="text-xs uppercase tracking-[0.22em] text-cyan-100/70">Global Settings</p>
-    <h2 class="text-2xl text-white font-semibold mt-1">Provider Keys (All Projects)</h2>
+    <h2 class="text-xl text-white font-semibold mt-1">Provider Keys (All Projects)</h2>
 
-    <div class="grid grid-cols-1 gap-3 mt-5">
-      <label class="label">ElevenLabs API Key</label>
-      <input
-        v-model="elevenlabsApiKey"
-        type="password"
-        placeholder="Paste to set/update (leave blank to keep current)"
-        class="input"
-      />
-      <p class="text-xs text-slate-400">Saved: {{ hasElevenlabs ? "Yes" : "No" }}</p>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+      <div class="field-card">
+        <label class="label">ElevenLabs API Key</label>
+        <input
+          v-model="elevenlabsApiKey"
+          type="password"
+          placeholder="Paste to set/update"
+          class="input"
+        />
+        <p class="meta">Saved: {{ hasElevenlabs ? "Yes" : "No" }}</p>
+      </div>
 
-      <label class="label mt-3">xAI API Key</label>
-      <input
-        v-model="xaiApiKey"
-        type="password"
-        placeholder="Paste to set/update (leave blank to keep current)"
-        class="input"
-      />
-      <p class="text-xs text-slate-400">Saved: {{ hasXai ? "Yes" : "No" }}</p>
+      <div class="field-card">
+        <label class="label">xAI API Key</label>
+        <input
+          v-model="xaiApiKey"
+          type="password"
+          placeholder="Paste to set/update"
+          class="input"
+        />
+        <p class="meta">Saved: {{ hasXai ? "Yes" : "No" }}</p>
+      </div>
 
-      <label class="label mt-3">xAI Model</label>
-      <input v-model="xaiModel" type="text" class="input" />
-
-      <button @click="saveGlobalSettings" :disabled="isSavingGlobal" class="btn-primary mt-2">
-        {{ isSavingGlobal ? "Saving..." : "Save Global Settings" }}
-      </button>
+      <div class="field-card lg:col-span-2">
+        <label class="label">xAI Model</label>
+        <div class="flex flex-col sm:flex-row gap-2 sm:items-center">
+          <input v-model="xaiModel" type="text" class="input grow" />
+          <button @click="saveGlobalSettings" :disabled="isSavingGlobal" class="btn-primary">
+            {{ isSavingGlobal ? "Saving..." : "Save" }}
+          </button>
+        </div>
+      </div>
     </div>
   </section>
-
-  <p v-if="message" class="text-xs text-cyan-200 mt-4">{{ message }}</p>
 </template>
 
 <style scoped>
 .label {
   color: #cbd5e1;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
+}
+
+.field-card {
+  border: 1px solid rgba(100, 116, 139, 0.35);
+  border-radius: 0.7rem;
+  background: rgba(2, 6, 23, 0.28);
+  padding: 0.65rem;
+}
+
+.meta {
+  color: #94a3b8;
+  font-size: 0.72rem;
+  margin-top: 0.35rem;
 }
 
 .input {
@@ -98,13 +117,14 @@ onMounted(async () => {
   border: 1px solid rgba(100, 116, 139, 0.55);
   background: rgba(15, 23, 42, 0.6);
   color: #e2e8f0;
-  padding: 0.55rem 0.7rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.82rem;
 }
 
 .btn-primary {
-  padding: 0.55rem 0.75rem;
+  padding: 0.46rem 0.75rem;
   border-radius: 0.6rem;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: #082f49;
   background: linear-gradient(180deg, rgba(34, 211, 238, 0.95), rgba(8, 145, 178, 0.95));

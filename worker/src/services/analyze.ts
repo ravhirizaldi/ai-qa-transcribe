@@ -1,6 +1,7 @@
 import { createXai } from "@ai-sdk/xai";
 import { generateObject } from "ai";
 import { z } from "zod";
+import { logProviderError, logProviderEvent } from "./providerLogs.js";
 
 const RoleEnum = z.enum(["CS", "Customer"]);
 const SentimentEnum = z.enum(["positive", "neutral", "negative"]);
@@ -61,7 +62,20 @@ export const analyzeConversation = async (
   matrixRows: MatrixRow[],
   xaiApiKey: string,
   model: string,
+  context?: { jobId?: string; batchId?: string },
 ) => {
+  const startedAt = Date.now();
+  logProviderEvent("info", "xai.analyze.request", {
+    provider: "xai",
+    endpoint: "ai.generateObject",
+    model,
+    callType,
+    transcriptSegments: segments.length,
+    matrixRows: matrixRows.length,
+    jobId: context?.jobId,
+    batchId: context?.batchId,
+  });
+
   const xai = createXai({ apiKey: xaiApiKey });
 
   const transcriptText = segments
@@ -75,10 +89,13 @@ export const analyzeConversation = async (
     .map((m) => `- **${m.area}** (Max Weight: ${m.weight}, Type: ${m.parameter}): ${m.description}`)
     .join("\n");
 
-  const { object } = await generateObject({
-    model: xai(model),
-    schema: ConversationAnalysisSchema,
-    system: `
+  let object: z.infer<typeof ConversationAnalysisSchema>;
+
+  try {
+    const result = await generateObject({
+      model: xai(model),
+      schema: ConversationAnalysisSchema,
+      system: `
 You are a QA analyst for Indonesian customer service calls (${callType} type).
 Output concise Bahasa Indonesia. Be factual, no repetition.
 
@@ -94,8 +111,27 @@ Rules:
 - qa_scorecard.evidence_timestamp: copy exact "MM:SS - MM:SS" from transcript lines.
 - Keep notes short and evidence-based.
 `,
-    prompt: `Analyze transcript lines in this format: [id] start - end speaker: text\n\n${transcriptText}`,
-  });
+      prompt: `Analyze transcript lines in this format: [id] start - end speaker: text\n\n${transcriptText}`,
+    });
+    object = result.object;
+  } catch (error) {
+    logProviderError(
+      "xai.analyze.failed",
+      {
+        provider: "xai",
+        endpoint: "ai.generateObject",
+        model,
+        callType,
+        transcriptSegments: segments.length,
+        matrixRows: matrixRows.length,
+        jobId: context?.jobId,
+        batchId: context?.batchId,
+        durationMs: Date.now() - startedAt,
+      },
+      error,
+    );
+    throw error;
+  }
 
   const byArea = new Map(matrixRows.map((row) => [row.area.trim().toLowerCase(), row]));
 
@@ -107,6 +143,19 @@ Rules:
       description: hit?.description || "",
       max_score: hit?.weight || 0,
     };
+  });
+
+  logProviderEvent("info", "xai.analyze.success", {
+    provider: "xai",
+    endpoint: "ai.generateObject",
+    model,
+    callType,
+    transcriptSegments: segments.length,
+    matrixRows: matrixRows.length,
+    evaluationRows: table.length,
+    jobId: context?.jobId,
+    batchId: context?.batchId,
+    durationMs: Date.now() - startedAt,
   });
 
   return {

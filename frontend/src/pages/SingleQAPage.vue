@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onUnmounted, ref, computed } from "vue";
 import { Mic, Sparkles, ShieldCheck, Activity } from "lucide-vue-next";
+import { toast } from "vue-sonner";
 import AudioUploader from "../components/AudioUploader.vue";
 import TranscriptViewer from "../components/TranscriptViewer.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
@@ -74,10 +75,15 @@ const syncJob = async () => {
     sentiment: seg.sentiment,
     words: seg.wordsJson,
   }));
-  transcript.value = detail.transcript || segments.value.map((s: any) => s.cleaned_text || s.text).join(" ");
+  transcript.value =
+    detail.transcript ||
+    segments.value.map((s: any) => s.cleaned_text || s.text).join(" ");
   analysis.value = detail.analysis;
 
-  isTranscribing.value = detail.status === "transcribing" || detail.status === "uploading" || detail.status === "queued";
+  isTranscribing.value =
+    detail.status === "transcribing" ||
+    detail.status === "uploading" ||
+    detail.status === "queued";
   isAnalyzing.value = detail.status === "analyzing";
 
   if (detail.status === "completed" || detail.status === "failed") {
@@ -85,7 +91,7 @@ const syncJob = async () => {
     isTranscribing.value = false;
     isAnalyzing.value = false;
     if (detail.status === "failed") {
-      alert(detail.errorMessage || "Failed to process audio.");
+      toast.error(detail.errorMessage || "Failed to process audio.");
     }
   }
 };
@@ -95,7 +101,8 @@ const startRealtime = () => {
 
   try {
     ws = connectWs((event: any) => {
-      if (event.batchId !== batchId.value && event.jobId !== jobId.value) return;
+      if (event.batchId !== batchId.value && event.jobId !== jobId.value)
+        return;
       void syncJob();
     });
     ws.onopen = () => {
@@ -115,7 +122,7 @@ const startRealtime = () => {
 const startProcessing = async () => {
   if (!pendingFile.value) return;
   if (!tenantId.value || !projectId.value) {
-    alert("Select tenant and project from Manage page first.");
+    toast.error("Select tenant and project from Manage page first.");
     return;
   }
 
@@ -147,7 +154,7 @@ const startProcessing = async () => {
     startRealtime();
   } catch (err) {
     console.error(err);
-    alert("Error starting backend processing. See console.");
+    toast.error("Error starting backend processing.");
     isTranscribing.value = false;
     isAnalyzing.value = false;
   }
@@ -155,7 +162,12 @@ const startProcessing = async () => {
 
 const hasBackendConfig = computed(() => {
   const hasToken = !!session.token.value;
-  return !!import.meta.env.VITE_API_BASE_URL && !!tenantId.value && !!projectId.value && hasToken;
+  return (
+    !!import.meta.env.VITE_API_BASE_URL &&
+    !!tenantId.value &&
+    !!projectId.value &&
+    hasToken
+  );
 });
 
 onUnmounted(() => {
@@ -164,13 +176,22 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="mb-6 rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-5 sm:p-6">
+  <section
+    class="mb-6 rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-5 sm:p-6"
+  >
     <div class="flex flex-wrap gap-3 items-start justify-between">
       <div>
-        <p class="text-xs uppercase tracking-[0.24em] text-cyan-100/70">Single QA Workspace</p>
-        <h2 class="mt-1 text-2xl sm:text-3xl text-white font-semibold title-font">Turn raw calls into QA-ready insights</h2>
+        <p class="text-xs uppercase tracking-[0.24em] text-cyan-100/70">
+          Nexto VoiceGuard - Single QA
+        </p>
+        <h2
+          class="mt-1 text-2xl sm:text-3xl text-white font-semibold title-font"
+        >
+          Turn raw calls into QA-ready insights
+        </h2>
         <p class="mt-2 text-sm text-slate-300/90 max-w-2xl">
-          Upload one support call and get a synced transcript, role-aware cleanup, sentiment hints, and structured coaching notes.
+          Upload one support call and get a synced transcript, role-aware
+          cleanup, sentiment hints, and structured coaching notes.
         </p>
       </div>
 
@@ -181,9 +202,15 @@ onUnmounted(() => {
           button-label="Upload Single Audio"
         />
         <div class="flex gap-2 flex-wrap justify-end">
-          <div class="pill"><Sparkles class="w-4 h-4" /><span>Auto Cleanup</span></div>
-          <div class="pill"><ShieldCheck class="w-4 h-4" /><span>QA Matrix</span></div>
-          <div class="pill"><Activity class="w-4 h-4" /><span>Sentiment Cues</span></div>
+          <div class="pill">
+            <Sparkles class="w-4 h-4" /><span>Auto Cleanup</span>
+          </div>
+          <div class="pill">
+            <ShieldCheck class="w-4 h-4" /><span>QA Matrix</span>
+          </div>
+          <div class="pill">
+            <Activity class="w-4 h-4" /><span>Sentiment Cues</span>
+          </div>
         </div>
       </div>
     </div>
@@ -194,7 +221,9 @@ onUnmounted(() => {
     class="mb-6 rounded-xl border border-amber-300/40 bg-amber-300/12 p-4"
   >
     <h3 class="text-amber-200 font-semibold mb-1">Missing Backend Config</h3>
-    <p class="text-sm text-amber-200/70">Configure API URL and select tenant/project from Manage page, then login.</p>
+    <p class="text-sm text-amber-200/70">
+      Configure API URL and select tenant/project from Manage page, then login.
+    </p>
   </div>
 
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[60vh]">
@@ -216,14 +245,22 @@ onUnmounted(() => {
 
       <div v-else-if="file && isTranscribing" class="state-card">
         <div class="scanner"></div>
-        <p class="text-base text-slate-100 font-medium">Transcribing audio...</p>
-        <p class="text-xs text-slate-400 mt-1">Detecting speaker turns and timestamps</p>
+        <p class="text-base text-slate-100 font-medium">
+          Transcribing audio...
+        </p>
+        <p class="text-xs text-slate-400 mt-1">
+          Detecting speaker turns and timestamps
+        </p>
       </div>
 
       <div v-else class="state-card state-card-empty">
         <Mic class="w-14 h-14 text-cyan-200/40 mb-4" />
-        <p class="text-slate-200 text-center font-medium">Upload an audio file to get started</p>
-        <p class="text-xs text-slate-400 mt-1">Supported: mp3, wav, m4a (max 50MB)</p>
+        <p class="text-slate-200 text-center font-medium">
+          Upload an audio file to get started
+        </p>
+        <p class="text-xs text-slate-400 mt-1">
+          Supported: mp3, wav, m4a (max 50MB)
+        </p>
       </div>
     </div>
 
@@ -243,13 +280,21 @@ onUnmounted(() => {
 
       <div v-else-if="transcript && isAnalyzing" class="state-card">
         <div class="scanner"></div>
-        <p class="text-base text-slate-100 font-medium">Analyzing transcript...</p>
-        <p class="text-xs text-slate-400 mt-1">Building QA scorecard and coaching cues</p>
+        <p class="text-base text-slate-100 font-medium">
+          Analyzing transcript...
+        </p>
+        <p class="text-xs text-slate-400 mt-1">
+          Building QA scorecard and coaching cues
+        </p>
       </div>
 
       <div v-else class="state-card state-card-empty">
-        <p class="text-slate-200 text-center font-medium">Analysis will appear here</p>
-        <p class="text-xs text-slate-400 mt-1">Summary, matrix, strengths and improvements</p>
+        <p class="text-slate-200 text-center font-medium">
+          Analysis will appear here
+        </p>
+        <p class="text-xs text-slate-400 mt-1">
+          Summary, matrix, strengths and improvements
+        </p>
       </div>
     </div>
   </div>
@@ -258,15 +303,24 @@ onUnmounted(() => {
     v-if="isConfirming"
     class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md"
   >
-    <div class="bg-slate-950/95 border border-cyan-300/20 rounded-2xl max-w-md w-full p-6 shadow-2xl popup-in">
+    <div
+      class="bg-slate-950/95 border border-cyan-300/20 rounded-2xl max-w-md w-full p-6 shadow-2xl popup-in"
+    >
       <div class="flex flex-col gap-4">
-        <div class="w-12 h-12 rounded-full bg-cyan-400/20 flex items-center justify-center self-center mb-2 border border-cyan-300/30">
+        <div
+          class="w-12 h-12 rounded-full bg-cyan-400/20 flex items-center justify-center self-center mb-2 border border-cyan-300/30"
+        >
           <Mic class="w-6 h-6 text-cyan-300" />
         </div>
 
         <div class="text-center">
-          <h3 class="text-xl font-semibold text-white mb-2 title-font">Ready to Analyze?</h3>
-          <p class="text-slate-300 text-sm mb-4">You selected <strong class="text-slate-200">{{ pendingFile?.name }}</strong></p>
+          <h3 class="text-xl font-semibold text-white mb-2 title-font">
+            Ready to Analyze?
+          </h3>
+          <p class="text-slate-300 text-sm mb-4">
+            You selected
+            <strong class="text-slate-200">{{ pendingFile?.name }}</strong>
+          </p>
 
           <div class="grid grid-cols-2 gap-3 text-sm">
             <button
@@ -338,7 +392,11 @@ onUnmounted(() => {
   min-height: 17rem;
   border-radius: 1rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.88));
+  background: linear-gradient(
+    180deg,
+    rgba(15, 23, 42, 0.8),
+    rgba(2, 6, 23, 0.88)
+  );
   display: flex;
   flex-direction: column;
   align-items: center;

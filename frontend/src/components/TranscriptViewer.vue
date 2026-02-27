@@ -14,6 +14,7 @@ const props = defineProps<{
   transcript: string;
   segments: any[];
   file: File | null;
+  audioUrl?: string | null;
   isMaximized?: boolean;
 }>();
 
@@ -23,20 +24,43 @@ const emit = defineEmits<{
 
 const waveformContainer = ref<HTMLElement | null>(null);
 const chatContainer = ref<HTMLElement | null>(null);
+const audioElement = ref<HTMLAudioElement | null>(null);
 const wavesurfer = ref<WaveSurfer | null>(null);
 const isPlaying = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
 const activeSegmentId = ref<number | null>(null);
+const isWaveReady = ref(false);
+const resolvedAudioUrl = ref("");
+let localFileUrl: string | null = null;
+
+const resolveAudioUrl = () => {
+  if (localFileUrl) {
+    URL.revokeObjectURL(localFileUrl);
+    localFileUrl = null;
+  }
+  if (props.file) {
+    localFileUrl = URL.createObjectURL(props.file);
+    resolvedAudioUrl.value = localFileUrl;
+    return;
+  }
+  resolvedAudioUrl.value = props.audioUrl || "";
+};
 
 const initWaveSurfer = () => {
-  if (!waveformContainer.value || !props.file) return;
+  resolveAudioUrl();
+  // Initialize from remote audio or local files directly
+  if (!waveformContainer.value) return;
+
+  const sourceUrl = resolvedAudioUrl.value;
+  if (!sourceUrl) return;
 
   if (wavesurfer.value) {
     wavesurfer.value.destroy();
   }
+  isWaveReady.value = false;
 
-  wavesurfer.value = WaveSurfer.create({
+  const options: any = {
     container: waveformContainer.value,
     waveColor: "#64748b",
     progressColor: "#22d3ee",
@@ -45,13 +69,19 @@ const initWaveSurfer = () => {
     barGap: 3,
     height: 72,
     normalize: true,
-  });
+  };
 
-  const audioUrl = URL.createObjectURL(props.file);
-  wavesurfer.value.load(audioUrl);
+  if (audioElement.value) {
+    options.media = audioElement.value;
+  }
+
+  wavesurfer.value = WaveSurfer.create(options);
+
+  wavesurfer.value.load(sourceUrl);
 
   wavesurfer.value.on("ready", () => {
     duration.value = wavesurfer.value?.getDuration() || 0;
+    isWaveReady.value = true;
   });
 
   wavesurfer.value.on("timeupdate", (time) => {
@@ -62,16 +92,33 @@ const initWaveSurfer = () => {
   wavesurfer.value.on("finish", () => {
     isPlaying.value = false;
   });
+
+  wavesurfer.value.on("error", () => {
+    isWaveReady.value = false;
+  });
 };
 
 const togglePlay = () => {
-  if (!wavesurfer.value) return;
-  isPlaying.value = !isPlaying.value;
-  wavesurfer.value.playPause();
+  if (wavesurfer.value && isWaveReady.value) {
+    isPlaying.value = !isPlaying.value;
+    wavesurfer.value.playPause();
+    return;
+  }
+
+  if (!audioElement.value) return;
+  if (audioElement.value.paused) {
+    void audioElement.value.play();
+    isPlaying.value = true;
+  } else {
+    audioElement.value.pause();
+    isPlaying.value = false;
+  }
 };
 
 const updateActiveSegment = (time: number) => {
-  const segment = props.segments.find((seg) => time >= seg.start && time <= seg.end);
+  const segment = props.segments.find(
+    (seg) => time >= seg.start && time <= seg.end,
+  );
   if (segment) {
     const idx = props.segments.indexOf(segment);
     if (activeSegmentId.value !== idx) {
@@ -90,9 +137,15 @@ const scrollToSegment = (idx: number) => {
 };
 
 const jumpToSegment = (start: number) => {
-  if (wavesurfer.value) {
+  if (wavesurfer.value && isWaveReady.value) {
     wavesurfer.value.setTime(start);
     wavesurfer.value.play();
+    isPlaying.value = true;
+    return;
+  }
+  if (audioElement.value) {
+    audioElement.value.currentTime = start;
+    void audioElement.value.play();
     isPlaying.value = true;
   }
 };
@@ -107,12 +160,23 @@ const formatTime = (seconds: number) => {
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
+const onAudioLoadedMetadata = (event: Event) => {
+  const el = event.currentTarget as HTMLAudioElement | null;
+  duration.value = Number(el?.duration || 0);
+};
+
+const onAudioTimeUpdate = (event: Event) => {
+  const el = event.currentTarget as HTMLAudioElement | null;
+  currentTime.value = Number(el?.currentTime || 0);
+  updateActiveSegment(currentTime.value);
+};
+
 onMounted(() => {
   initWaveSurfer();
 });
 
 watch(
-  () => props.file,
+  () => [props.file, props.audioUrl],
   () => {
     initWaveSurfer();
   },
@@ -121,6 +185,10 @@ watch(
 onUnmounted(() => {
   if (wavesurfer.value) {
     wavesurfer.value.destroy();
+  }
+  if (localFileUrl) {
+    URL.revokeObjectURL(localFileUrl);
+    localFileUrl = null;
   }
 });
 </script>
@@ -160,9 +228,31 @@ onUnmounted(() => {
         </button>
 
         <div class="flex-1">
-          <div ref="waveformContainer" class="h-16"></div>
+          <div
+            v-show="!isWaveReady"
+            class="h-16 flex items-center justify-center text-cyan-200/50 text-xs gap-2"
+          >
+            <div
+              class="w-3 h-3 rounded-full border-2 border-cyan-400/30 border-t-cyan-400 animate-spin"
+            ></div>
+            Loading waveform...
+          </div>
+          <div v-show="isWaveReady" ref="waveformContainer" class="h-16"></div>
         </div>
       </div>
+
+      <audio
+        ref="audioElement"
+        class="hidden"
+        :src="resolvedAudioUrl || undefined"
+        controls
+        preload="metadata"
+        @loadedmetadata="onAudioLoadedMetadata"
+        @timeupdate="onAudioTimeUpdate"
+        @play="isPlaying = true"
+        @pause="isPlaying = false"
+        @ended="isPlaying = false"
+      ></audio>
 
       <div
         class="flex items-center gap-1.5 mt-2 text-xs text-slate-300/80 font-mono"
@@ -302,6 +392,12 @@ onUnmounted(() => {
 .play-button:hover {
   transform: translateY(-1px);
   filter: brightness(1.07);
+}
+
+.native-audio {
+  margin-top: 0.55rem;
+  width: 100%;
+  height: 2rem;
 }
 
 .message-card {

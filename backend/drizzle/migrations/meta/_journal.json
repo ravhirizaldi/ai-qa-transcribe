@@ -29,6 +29,13 @@
       "when": 1772182218856,
       "tag": "0003_fantastic_queen_noir",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1772232000000,
+      "tag": "0004_tenant_project_integrity",
+      "breakpoints": true
     }
   ]
 }

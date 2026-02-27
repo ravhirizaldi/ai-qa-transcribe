@@ -8,7 +8,7 @@ import BatchQAPage from "../pages/BatchQAPage.vue";
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", redirect: "/single" },
+    { path: "/", redirect: "/batch" },
     { path: "/login", component: LoginPage, meta: { public: true } },
     { path: "/manage", component: ManagePage },
     { path: "/settings", component: SettingsPage },
@@ -26,7 +26,7 @@ router.beforeEach((to) => {
   }
 
   if (isPublic && token) {
-    return "/manage";
+    return "/batch";
   }
 
   return true;
