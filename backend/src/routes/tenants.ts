@@ -4,21 +4,25 @@ import type { FastifyPluginAsync } from "fastify";
 import { db } from "../db.js";
 import {
   batches,
+  globalProviderSettings,
   jobAnalyses,
   jobEvaluationRows,
   jobs,
   jobSegments,
   jobTranscripts,
+  projectMemberships,
   projectMatrixRows,
   projectMatrixVersions,
   projectProviderSettings,
   projects,
   tenantMemberships,
   tenants,
+  users,
 } from "../../drizzle/schema.js";
 import {
   assertProjectAccess,
   assertTenantAccess,
+  listAccessibleProjects,
   listAccessibleTenants,
 } from "../repos/access.js";
 import { toSlug } from "../utils/slug.js";
@@ -49,8 +53,17 @@ const UpdateProjectSchema = z.object({
 
 const ProjectSettingsSchema = z.object({
   elevenlabsApiKey: z.string().optional(),
+});
+
+const GlobalSettingsSchema = z.object({
   xaiApiKey: z.string().optional(),
   xaiModel: z.string().optional(),
+});
+
+const UserVisibilitySchema = z.object({
+  isRestricted: z.boolean(),
+  role: z.enum(["owner", "admin", "member", "viewer"]).optional(),
+  projectIds: z.array(z.string().uuid()).default([]),
 });
 
 const assertManageRole = (role: string) => {
@@ -89,6 +102,7 @@ const deleteProjectCascade = async (projectId: string) => {
 
   await db.delete(projectMatrixVersions).where(eq(projectMatrixVersions.projectId, projectId));
   await db.delete(projectProviderSettings).where(eq(projectProviderSettings.projectId, projectId));
+  await db.delete(projectMemberships).where(eq(projectMemberships.projectId, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 };
 
@@ -128,7 +142,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/tenants/:tenantId", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     const payload = UpdateTenantSchema.parse(request.body);
-    const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
+    const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+      requireMembership: true,
+    });
+
+    if (!actor) {
+      return reply.code(403).send({ message: "Insufficient permissions" });
+    }
 
     try {
       assertManageRole(actor.role);
@@ -151,7 +171,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
   app.delete("/tenants/:tenantId", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
-    const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
+    const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+      requireMembership: true,
+    });
+
+    if (!actor) {
+      return reply.code(403).send({ message: "Insufficient permissions" });
+    }
 
     try {
       assertManageRole(actor.role);
@@ -178,9 +204,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
     await assertTenantAccess(params.tenantId, (request.user as any).sub);
 
-    return db.query.projects.findMany({
-      where: eq(projects.tenantId, params.tenantId),
-    });
+    return listAccessibleProjects(params.tenantId, (request.user as any).sub);
   });
 
   app.post(
@@ -189,7 +213,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const params = z.object({ tenantId: z.string().uuid() }).parse(request.params);
       const payload = CreateProjectSchema.parse(request.body);
-      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
+      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+
+      if (!actor) {
+        return reply.code(403).send({ message: "Insufficient permissions" });
+      }
 
       try {
         assertManageRole(actor.role);
@@ -254,7 +284,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         .object({ tenantId: z.string().uuid(), projectId: z.string().uuid() })
         .parse(request.params);
       const payload = UpdateProjectSchema.parse(request.body);
-      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
+      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+
+      if (!actor) {
+        return reply.code(403).send({ message: "Insufficient permissions" });
+      }
 
       try {
         assertManageRole(actor.role);
@@ -293,7 +329,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       const params = z
         .object({ tenantId: z.string().uuid(), projectId: z.string().uuid() })
         .parse(request.params);
-      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
+      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+
+      if (!actor) {
+        return reply.code(403).send({ message: "Insufficient permissions" });
+      }
 
       try {
         assertManageRole(actor.role);
@@ -325,8 +367,6 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return {
         projectId: params.projectId,
         hasElevenlabsApiKey: Boolean(settings?.elevenlabsApiKey),
-        hasXaiApiKey: Boolean(settings?.xaiApiKey),
-        xaiModel: settings?.xaiModel || "grok-4-1-fast-non-reasoning",
       };
     },
   );
@@ -342,10 +382,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ message: "Project not found" });
       }
 
-      const actor = await assertTenantAccess(project.tenantId, (request.user as any).sub);
-      try {
-        assertManageRole(actor.role);
-      } catch {
+      const actor = await assertTenantAccess(project.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+      if (!actor || !["owner", "admin"].includes(actor.role)) {
         return reply.code(403).send({ message: "Insufficient permissions" });
       }
 
@@ -358,14 +398,6 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           payload.elevenlabsApiKey !== undefined
             ? payload.elevenlabsApiKey || null
             : existing?.elevenlabsApiKey || null,
-        xaiApiKey:
-          payload.xaiApiKey !== undefined
-            ? payload.xaiApiKey || null
-            : existing?.xaiApiKey || null,
-        xaiModel:
-          payload.xaiModel !== undefined
-            ? payload.xaiModel || null
-            : existing?.xaiModel || "grok-4-1-fast-non-reasoning",
       };
 
       if (existing) {
@@ -383,11 +415,52 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       return {
         ok: true,
         hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
-        hasXaiApiKey: Boolean(nextValues.xaiApiKey),
-        xaiModel: nextValues.xaiModel,
       };
     },
   );
+
+  app.get("/settings/global", { preHandler: app.authenticate }, async () => {
+    const settings = await db.query.globalProviderSettings.findFirst({
+      orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    });
+
+    return {
+      hasXaiApiKey: Boolean(settings?.xaiApiKey),
+      xaiModel: settings?.xaiModel || "grok-4-1-fast-non-reasoning",
+    };
+  });
+
+  app.put("/settings/global", { preHandler: app.authenticate }, async (request) => {
+    const payload = GlobalSettingsSchema.parse(request.body);
+    const existing = await db.query.globalProviderSettings.findFirst({
+      orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    });
+
+    const nextValues = {
+      xaiApiKey:
+        payload.xaiApiKey !== undefined ? payload.xaiApiKey || null : existing?.xaiApiKey || null,
+      xaiModel:
+        payload.xaiModel !== undefined
+          ? payload.xaiModel || null
+          : existing?.xaiModel || "grok-4-1-fast-non-reasoning",
+      updatedBy: (request.user as any).sub,
+    };
+
+    if (existing) {
+      await db
+        .update(globalProviderSettings)
+        .set({ ...nextValues, updatedAt: new Date() })
+        .where(eq(globalProviderSettings.id, existing.id));
+    } else {
+      await db.insert(globalProviderSettings).values(nextValues);
+    }
+
+    return {
+      ok: true,
+      hasXaiApiKey: Boolean(nextValues.xaiApiKey),
+      xaiModel: nextValues.xaiModel,
+    };
+  });
 
   app.post(
     "/tenants/:tenantId/members",
@@ -401,8 +474,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         })
         .parse(request.body);
 
-      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub);
-      if (!["owner", "admin"].includes(actor.role)) {
+      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+      if (!actor || !["owner", "admin"].includes(actor.role)) {
         return reply.code(403).send({ message: "Insufficient permissions" });
       }
 
@@ -433,6 +508,80 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         .returning();
 
       return membership;
+    },
+  );
+
+  app.put(
+    "/tenants/:tenantId/members/:userId/access",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = z
+        .object({ tenantId: z.string().uuid(), userId: z.string().uuid() })
+        .parse(request.params);
+      const body = UserVisibilitySchema.parse(request.body);
+
+      const actor = await assertTenantAccess(params.tenantId, (request.user as any).sub, {
+        requireMembership: true,
+      });
+      if (!actor || !["owner", "admin"].includes(actor.role)) {
+        return reply.code(403).send({ message: "Insufficient permissions" });
+      }
+
+      const target = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
+      if (!target) {
+        return reply.code(404).send({ message: "User not found" });
+      }
+
+      const existingMembership = await db.query.tenantMemberships.findFirst({
+        where: and(
+          eq(tenantMemberships.tenantId, params.tenantId),
+          eq(tenantMemberships.userId, params.userId),
+        ),
+      });
+
+      if (existingMembership) {
+        await db
+          .update(tenantMemberships)
+          .set({ role: body.role || existingMembership.role, updatedAt: new Date() })
+          .where(eq(tenantMemberships.id, existingMembership.id));
+      } else {
+        await db.insert(tenantMemberships).values({
+          tenantId: params.tenantId,
+          userId: params.userId,
+          role: body.role || "member",
+        });
+      }
+
+      await db
+        .update(users)
+        .set({ isRestricted: body.isRestricted, updatedAt: new Date() })
+        .where(eq(users.id, params.userId));
+
+      const tenantProjects = await db.query.projects.findMany({
+        where: eq(projects.tenantId, params.tenantId),
+        columns: { id: true },
+      });
+      const tenantProjectIds = tenantProjects.map((project) => project.id);
+
+      if (tenantProjectIds.length) {
+        await db.delete(projectMemberships).where(
+          and(
+            eq(projectMemberships.userId, params.userId),
+            inArray(projectMemberships.projectId, tenantProjectIds),
+          ),
+        );
+      }
+
+      if (body.projectIds.length) {
+        await db.insert(projectMemberships).values(
+          body.projectIds.map((projectId) => ({
+            projectId,
+            userId: params.userId,
+          })),
+        );
+      }
+
+      return { ok: true };
     },
   );
 };

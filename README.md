@@ -6,6 +6,13 @@ This folder contains a multi-tenant call QA system:
 - `backend`: Fastify API (auth, tenants/projects, matrix, jobs, websocket)
 - `worker`: pg-boss worker (transcribe -> analyze -> finalize)
 
+## Behavior Notes
+
+- New users are unrestricted by default and can view all tenants/projects.
+- Admin can manually restrict visibility per user to selected tenants/projects.
+- xAI API key/model are global settings used by all projects.
+- ElevenLabs API key is project-level setting.
+
 ## Prerequisites
 
 - Node.js 20+
@@ -39,7 +46,7 @@ Update values:
   - `PORT` (default `3001`)
 - `worker/.env`
   - `DATABASE_URL`
-  - Optional fallback: `ELEVENLABS_API_KEY`, `XAI_API_KEY`, `XAI_MODEL`
+  - Optional fallback only: `ELEVENLABS_API_KEY`, `XAI_API_KEY`, `XAI_MODEL`
 - `frontend/.env`
   - `VITE_API_BASE_URL` (for example `http://localhost:3001`)
   - `VITE_WS_URL` (for example `ws://localhost:3001/ws`)
@@ -67,20 +74,22 @@ Frontend default URL is typically `http://localhost:5173`.
 
 ## Seed First Admin User
 
-There is no separate admin seed script yet. Use the API bootstrap flow:
+There is no separate admin seed script. Use the bootstrap flow:
 
-1. Register your first user (this becomes your authenticated user).
-2. Create your first tenant with that user.
-3. The creator is automatically added as tenant `owner` (admin role for tenant management).
+1. Register first user.
+2. Create first tenant.
+3. Tenant creator is automatically assigned `owner` on that tenant.
 
-### Option A: Use UI (recommended)
+### Option A: Use UI
 
 1. Open frontend `/login` and register.
-2. Go to `/manage` and create your first tenant.
-3. Create projects under that tenant.
-4. Go to `/settings` and save provider keys per project.
+2. Open `/manage` and create tenant/project.
+3. Open `/settings`:
+   - set global xAI key/model
+   - set project ElevenLabs key
+4. Use `/single` or `/batch` to process recordings.
 
-### Option B: Use API directly (curl)
+### Option B: Use API (curl)
 
 Register:
 
@@ -90,7 +99,7 @@ curl -X POST http://localhost:3001/auth/register \
   -d '{"email":"admin@example.com","password":"ChangeMe123!"}'
 ```
 
-Copy the returned `token`, then create tenant:
+Create tenant:
 
 ```bash
 curl -X POST http://localhost:3001/tenants \
@@ -99,7 +108,7 @@ curl -X POST http://localhost:3001/tenants \
   -d '{"name":"CODEX","logoUrl":null}'
 ```
 
-Create project under tenant:
+Create project:
 
 ```bash
 curl -X POST http://localhost:3001/tenants/<TENANT_ID>/projects \
@@ -108,13 +117,31 @@ curl -X POST http://localhost:3001/tenants/<TENANT_ID>/projects \
   -d '{"name":"CS Inbound","supportsInbound":true,"supportsOutbound":false}'
 ```
 
-Set provider settings for project:
+Set global xAI settings:
+
+```bash
+curl -X PUT http://localhost:3001/settings/global \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"xaiApiKey":"<XAI_KEY>","xaiModel":"grok-4-1-fast-non-reasoning"}'
+```
+
+Set project ElevenLabs settings:
 
 ```bash
 curl -X PUT http://localhost:3001/projects/<PROJECT_ID>/settings \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"elevenlabsApiKey":"<ELEVENLABS_KEY>","xaiApiKey":"<XAI_KEY>","xaiModel":"grok-4-1-fast-non-reasoning"}'
+  -d '{"elevenlabsApiKey":"<ELEVENLABS_KEY>"}'
+```
+
+Restrict user visibility manually (admin):
+
+```bash
+curl -X PUT http://localhost:3001/tenants/<TENANT_ID>/members/<USER_ID>/access \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"isRestricted":true,"role":"member","projectIds":["<PROJECT_ID>"]}'
 ```
 
 ## Useful Commands

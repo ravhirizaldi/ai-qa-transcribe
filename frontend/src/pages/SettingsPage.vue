@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { getProjectSettings, updateProjectSettings } from "../services/backendApi";
+import {
+  getGlobalSettings,
+  getProjectSettings,
+  updateGlobalSettings,
+  updateProjectSettings,
+} from "../services/backendApi";
 import { useSession } from "../services/session";
 
 const { projectId } = useSession();
@@ -8,44 +13,69 @@ const { projectId } = useSession();
 const elevenlabsApiKey = ref("");
 const xaiApiKey = ref("");
 const xaiModel = ref("grok-4-1-fast-non-reasoning");
+
 const hasElevenlabs = ref(false);
 const hasXai = ref(false);
-const isSaving = ref(false);
+
+const isSavingProject = ref(false);
+const isSavingGlobal = ref(false);
 const message = ref("");
 
 const load = async () => {
   message.value = "";
-  if (!projectId.value) return;
-  const settings = await getProjectSettings(projectId.value);
-  hasElevenlabs.value = settings.hasElevenlabsApiKey;
-  hasXai.value = settings.hasXaiApiKey;
-  xaiModel.value = settings.xaiModel;
+
+  const global = await getGlobalSettings();
+  hasXai.value = global.hasXaiApiKey;
+  xaiModel.value = global.xaiModel;
+
+  if (projectId.value) {
+    const project = await getProjectSettings(projectId.value);
+    hasElevenlabs.value = project.hasElevenlabsApiKey;
+  } else {
+    hasElevenlabs.value = false;
+  }
 };
 
-const save = async () => {
+const saveProjectSettings = async () => {
   if (!projectId.value) {
     message.value = "Select a project first in Manage page.";
     return;
   }
 
-  isSaving.value = true;
+  isSavingProject.value = true;
   message.value = "";
   try {
     const result = await updateProjectSettings(projectId.value, {
       elevenlabsApiKey: elevenlabsApiKey.value,
-      xaiApiKey: xaiApiKey.value,
-      xaiModel: xaiModel.value,
     });
 
     hasElevenlabs.value = result.hasElevenlabsApiKey;
-    hasXai.value = result.hasXaiApiKey;
-    message.value = "Settings saved.";
+    message.value = "Project settings saved.";
     elevenlabsApiKey.value = "";
-    xaiApiKey.value = "";
   } catch (error) {
-    message.value = error instanceof Error ? error.message : "Failed to save settings";
+    message.value = error instanceof Error ? error.message : "Failed to save project settings";
   } finally {
-    isSaving.value = false;
+    isSavingProject.value = false;
+  }
+};
+
+const saveGlobalSettings = async () => {
+  isSavingGlobal.value = true;
+  message.value = "";
+
+  try {
+    const result = await updateGlobalSettings({
+      xaiApiKey: xaiApiKey.value,
+      xaiModel: xaiModel.value,
+    });
+    hasXai.value = result.hasXaiApiKey;
+    xaiModel.value = result.xaiModel;
+    xaiApiKey.value = "";
+    message.value = "Global AI settings saved.";
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : "Failed to save global settings";
+  } finally {
+    isSavingGlobal.value = false;
   }
 };
 
@@ -55,46 +85,55 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="max-w-3xl rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-6">
-    <p class="text-xs uppercase tracking-[0.22em] text-cyan-100/70">Site Settings</p>
-    <h2 class="text-2xl text-white font-semibold mt-1">Provider Keys per Project</h2>
-    <p class="text-sm text-slate-300 mt-2">
-      Active project: <span class="text-cyan-200">{{ projectId || "none" }}</span>
-    </p>
+  <section class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+    <div class="rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-6">
+      <p class="text-xs uppercase tracking-[0.22em] text-cyan-100/70">Project Settings</p>
+      <h2 class="text-2xl text-white font-semibold mt-1">Transcription Provider</h2>
+      <p class="text-sm text-slate-300 mt-2">
+        Active project: <span class="text-cyan-200">{{ projectId || "none" }}</span>
+      </p>
 
-    <div class="grid grid-cols-1 gap-3 mt-5">
-      <label class="label">ElevenLabs API Key</label>
-      <input
-        v-model="elevenlabsApiKey"
-        type="password"
-        placeholder="Paste to set/update (leave blank to keep current)"
-        class="input"
-      />
-      <p class="text-xs text-slate-400">Saved: {{ hasElevenlabs ? "Yes" : "No" }}</p>
+      <div class="grid grid-cols-1 gap-3 mt-5">
+        <label class="label">ElevenLabs API Key</label>
+        <input
+          v-model="elevenlabsApiKey"
+          type="password"
+          placeholder="Paste to set/update (leave blank to keep current)"
+          class="input"
+        />
+        <p class="text-xs text-slate-400">Saved: {{ hasElevenlabs ? "Yes" : "No" }}</p>
 
-      <label class="label mt-3">xAI API Key</label>
-      <input
-        v-model="xaiApiKey"
-        type="password"
-        placeholder="Paste to set/update (leave blank to keep current)"
-        class="input"
-      />
-      <p class="text-xs text-slate-400">Saved: {{ hasXai ? "Yes" : "No" }}</p>
+        <button @click="saveProjectSettings" :disabled="isSavingProject" class="btn-primary mt-2">
+          {{ isSavingProject ? "Saving..." : "Save Project Settings" }}
+        </button>
+      </div>
+    </div>
 
-      <label class="label mt-3">xAI Model</label>
-      <input v-model="xaiModel" type="text" class="input" />
+    <div class="rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md p-6">
+      <p class="text-xs uppercase tracking-[0.22em] text-cyan-100/70">Global Settings</p>
+      <h2 class="text-2xl text-white font-semibold mt-1">AI Provider (All Projects)</h2>
 
-      <button
-        @click="save"
-        :disabled="isSaving"
-        class="btn-primary mt-2"
-      >
-        {{ isSaving ? "Saving..." : "Save Settings" }}
-      </button>
+      <div class="grid grid-cols-1 gap-3 mt-5">
+        <label class="label">xAI API Key</label>
+        <input
+          v-model="xaiApiKey"
+          type="password"
+          placeholder="Paste to set/update (leave blank to keep current)"
+          class="input"
+        />
+        <p class="text-xs text-slate-400">Saved: {{ hasXai ? "Yes" : "No" }}</p>
 
-      <p v-if="message" class="text-xs text-cyan-200">{{ message }}</p>
+        <label class="label mt-3">xAI Model</label>
+        <input v-model="xaiModel" type="text" class="input" />
+
+        <button @click="saveGlobalSettings" :disabled="isSavingGlobal" class="btn-primary mt-2">
+          {{ isSavingGlobal ? "Saving..." : "Save Global Settings" }}
+        </button>
+      </div>
     </div>
   </section>
+
+  <p v-if="message" class="text-xs text-cyan-200 mt-4">{{ message }}</p>
 </template>
 
 <style scoped>

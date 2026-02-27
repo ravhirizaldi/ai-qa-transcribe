@@ -33,6 +33,7 @@ export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  isRestricted: boolean("is_restricted").default(false).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -74,12 +75,31 @@ export const projects = pgTable(
   (t) => [unique().on(t.tenantId, t.slug)],
 );
 
+export const projectMemberships = pgTable(
+  "project_memberships",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id").notNull().references(() => projects.id),
+    userId: uuid("user_id").notNull().references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.projectId, t.userId)],
+);
+
 export const projectProviderSettings = pgTable("project_provider_settings", {
   id: uuid("id").defaultRandom().primaryKey(),
   projectId: uuid("project_id").notNull().unique().references(() => projects.id),
   elevenlabsApiKey: text("elevenlabs_api_key"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const globalProviderSettings = pgTable("global_provider_settings", {
+  id: uuid("id").defaultRandom().primaryKey(),
   xaiApiKey: text("xai_api_key"),
   xaiModel: text("xai_model"),
+  updatedBy: uuid("updated_by").references(() => users.id),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
