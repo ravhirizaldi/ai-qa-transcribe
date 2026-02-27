@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 const EnvSchema = z.object({
@@ -10,5 +13,15 @@ const EnvSchema = z.object({
 });
 
 export type Env = z.infer<typeof EnvSchema>;
+
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+const envCandidates = [resolve(process.cwd(), ".env"), resolve(moduleDir, "../.env")];
+
+for (const envPath of envCandidates) {
+  if (existsSync(envPath)) {
+    process.loadEnvFile(envPath);
+    break;
+  }
+}
 
 export const env = EnvSchema.parse(process.env);
