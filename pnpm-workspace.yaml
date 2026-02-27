@@ -2,4 +2,4 @@ packages:
   - "backend"
   - "frontend"
   - "worker"
-  - "../packages/shared"
+  - "shared"
