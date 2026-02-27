@@ -1,0 +1,43 @@
+{
+  "language_selection": [
+    "tekan",
+    "press",
+    "pilih bahasa",
+    "for english",
+    "untuk bahasa indonesia"
+  ],
+  "queue_info": [
+    "antrian",
+    "jumlah antrian saat ini nol",
+    "jumlah antrian saat ini 0",
+    "jumlah antrian saat ini satu",
+    "nomor antrian",
+    "estimated waiting",
+    "mohon menunggu",
+    "tunggu sebentar",
+    "queue number"
+  ],
+  "recording_notice": [
+    "direkam",
+    "recorded",
+    "quality purposes",
+    "demi peningkatan kualitas",
+    "percakapan ini akan direkam"
+  ],
+  "menu_navigation": [
+    "untuk",
+    "press one",
+    "press two",
+    "tekan satu",
+    "tekan dua",
+    "tekan nol",
+    "operator kami",
+    "nomor satu",
+    "nomor dua"
+  ],
+  "greetings_automated": [
+    "English Prepaid",
+    "Samsung Contact Center",
+    "Selamat datang di"
+  ]
+}

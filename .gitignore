@@ -1,0 +1,17 @@
+# Env files
+.env
+.env.*
+!.env.example
+
+# Local frontend env with secrets
+frontend/.env.frontend.local
+
+# Dependencies / build artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# OS/editor
+.DS_Store
+.vscode/

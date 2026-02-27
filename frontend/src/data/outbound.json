@@ -1,0 +1,74 @@
+[
+  {
+    "area": "Greeting Opening",
+    "parameter": "NCE",
+    "description": "Menyebutkan nama perusahaan, nama agent dan greeting (pagi/siang/sore) dengan benar dan jelas. Meminta kesediaan waktu pelanggan. Jika bersedia maka lanjutkan verifikasi. Jika sedang sibuk maka dilakukan appointment dan jika menolak maka langsung closing. Menyampaikan maksud dan tujuan menghubungi pelanggan. Menyampaikan greeting dengan ramah",
+    "weight": 5
+  },
+  {
+    "area": "Verification or Confirmation",
+    "parameter": "NCE",
+    "description": "Menanyakan/menyapa nama pelanggan. Verifikasi data pelanggan, disesuaikan dengan kategori permintaan/keluhan dan kebijakan yang berlaku (seperti nomor telepon, alamat, dll jika diperlukan)",
+    "weight": 5
+  },
+  {
+    "area": "Correct Info and Solution",
+    "parameter": "CE",
+    "description": "Memberikan informasi sesuai dengan campaign yang dilakukan (telesurvey/collection/retention/CRM/etc) dengan tepat, akurat dan lengkap sesuai dengan panduan dan atau kebijakan yang berlaku",
+    "weight": 15
+  },
+  {
+    "area": "Tools",
+    "parameter": "CE",
+    "description": "Memilih type interaksi yang tepat sesuai dengan pertanyaan/keluhan pelanggan. Mengisi data field yang sesuai dengan interaksi lengkap dan benar",
+    "weight": 15
+  },
+  {
+    "area": "Privacy Policy",
+    "parameter": "CE",
+    "description": "Menjaga privacy pelanggan, tidak memberikan informasi confidential /data pribadi apapun tanpa sepengetahuan dan seijin pelanggan, tidak menggunakan data pelanggan/perusahaan untuk kepentingan pribadi dan hal lainnya yang melanggar hukum",
+    "weight": 15
+  },
+  {
+    "area": "Hospitality",
+    "parameter": "CE",
+    "description": "Menjaga sikap profesional dan image perusahaan, tidak membentak, tidak berbicara kasar, tidak menggurui, tidak menutup pembicaraan sepihak, mengabaikan pelanggan yang menyebabkan pelanggan kecewa atas perilaku agent",
+    "weight": 15
+  },
+  {
+    "area": "Empathy",
+    "parameter": "NCE",
+    "description": "Emphaty terhadap keluhan pelanggan (menyampaikan permintaan maaf atau kalimat turut prihatin atas kendala yang terjadi pada pelanggan), disesuaikan kebijakan yang berlaku",
+    "weight": 5
+  },
+  {
+    "area": "Voice Quality",
+    "parameter": "NCE",
+    "description": "Volume suara normal; tidak terlalu pelan/keras, tidak terdengar logat daerah tertentu. Artikulasi jelas. Ritme bicara, tidak terlalu cepat/lambat. Suara terdengar antusias dan smiling voice",
+    "weight": 5
+  },
+  {
+    "area": "Call Management",
+    "parameter": "NCE",
+    "description": "Sistematis (tidak mengulang-ulang pembicaraan, tidak berbelit belit) dan mampu mengatur alur percakapan. Terdengar percaya diri, tidak terkesan ragu dalam menyampaikan informasi atau solusi. Menggunakan bahasa baku, tidak menggunakan kata jargon; bahasa sistem, bahasa daerah, bahasa tidak baku (sesuai kebijakan). Fokus; mampu menangkap informasi yang disampaikan pelanggan, menyapa pelanggan dengan benar (seperti Bapak/Ibu, nama dll)",
+    "weight": 5
+  },
+  {
+    "area": "Hold/mute",
+    "parameter": "NCE",
+    "description": "Hold hanya dilakukan jika diperlukan dengan meminta izin/persetujuan pelanggan dan mengucapkan terimakasih atas kesediaan pelanggan menunggu. Mute dapat digunakan agent untuk kondisi bersin, batuk, sendawa. Hold maksimal 1 menit, jika perlu tambahan waktu konfirmasi kesediaan pelanggan /tawarkan untuk dihubungi kembali pada waktu yang telah disepakati",
+    "weight": 5
+  },
+  {
+    "area": "Reconfirm the Agreement",
+    "parameter": "NCE",
+    "description": "Menyampaikan summary hasil pembicaraan dengan pelanggan (sesuai dengan script/kebijakan masing-masing project). Memastikan informasi yang disampaikan sudah jelas dan bisa diterima oleh pelanggan dan pastikan pelanggan merespon konfirmasi tersebut",
+    "weight": 5
+  },
+  {
+    "area": "Closing Greeting",
+    "parameter": "NCE",
+    "description": "Menyampaikan salam penutup dengan lengkap, jelas dan benar. (Optional) Mengucapkan 'Magic word' untuk inquiry disesuaikan dengan kondisi dan waktu pelanggan menelpon (sesuai kebijakan)",
+    "weight": 5
+  }
+]

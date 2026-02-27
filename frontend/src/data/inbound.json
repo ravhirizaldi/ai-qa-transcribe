@@ -1,0 +1,86 @@
+[
+  {
+    "area": "Greeting Opening",
+    "parameter": "NCE",
+    "description": "Sigap menerima dan mengangkat telepon (maks 3 detik, tergantung kebijakan project). Menyebutkan nama perusahaan, nama agent dan greeting (pagi/siang/sore) dengan benar dan jelas. Menawarkan bantuan. Menyampaikan greeting dengan ramah. Samsung service selamat pagi/siang/sore/malam bersama (agent) bisa dibantu?",
+    "weight": 3
+  },
+  {
+    "area": "Verification or Confirmation",
+    "parameter": "NCE",
+    "description": "Menanyakan/menyapa nama pelanggan. Verifikasi data pelanggan, disesuaikan dengan kategori permintaan/keluhan dan kebijakan yang berlaku (seperti nomor telepon, alamat, dll jika diperlukan)",
+    "weight": 5
+  },
+  {
+    "area": "Probing/Data Gathering",
+    "parameter": "NCE",
+    "description": "Identifikasi kebutuhan pelanggan dengan menggali informasi secara efektif sesuai panduan dan atau kebijakan",
+    "weight": 5
+  },
+  {
+    "area": "Correct Answer and Solution",
+    "parameter": "CE",
+    "description": "Memberikan informasi dan atau solusi atas pertanyaan/keluhan pelanggan dengan tepat, akurat dan lengkap sesuai dengan panduan (Knowledge Base) dan atau kebijakan yang berlaku",
+    "weight": 15
+  },
+  {
+    "area": "Tools",
+    "parameter": "CE",
+    "description": "Memilih type interaksi yang tepat sesuai dengan pertanyaan/keluhan pelanggan. Mengisi data field yang sesuai dengan interaksi lengkap dan benar",
+    "weight": 15
+  },
+  {
+    "area": "Privacy Policy",
+    "parameter": "CE",
+    "description": "Menjaga privacy pelanggan, tidak memberikan informasi confidential /data pribadi apapun tanpa sepengetahuan dan seijin pelanggan, tidak menggunakan data pelanggan/perusahaan untuk kepentingan pribadi dan hal lainnya yang melanggar hukum",
+    "weight": 10
+  },
+  {
+    "area": "Hospitality",
+    "parameter": "CE",
+    "description": "Menjaga sikap profesional dan image perusahaan, tidak membentak, tidak berbicara kasar, tidak menggurui, tidak menutup pembicaraan sepihak, mengabaikan pelanggan yang menyebabkan pelanggan kecewa atas perilaku agent",
+    "weight": 15
+  },
+  {
+    "area": "Greet Customer Name",
+    "parameter": "NCE",
+    "description": "Menyebutkan nama pelanggan minimal 3 kali",
+    "weight": 4
+  },
+  {
+    "area": "Empathy",
+    "parameter": "NCE",
+    "description": "Empathy terhadap keluhan pelanggan (menyampaikan permintaan maaf atau kalimat turut prihatin atas kendala yang terjadi pada pelanggan), disesuaikan kebijakan yang berlaku",
+    "weight": 5
+  },
+  {
+    "area": "Voice Quality",
+    "parameter": "NCE",
+    "description": "Volume suara normal; tidak terlalu pelan/keras, tidak terdengar logat daerah tertentu. Artikulasi jelas. Ritme bicara, tidak terlalu cepat/lambat. Suara terdengar antusias dan smiling voice",
+    "weight": 5
+  },
+  {
+    "area": "Call Management",
+    "parameter": "NCE",
+    "description": "Sistematis dan mampu mengatur alur percakapan (tidak mengulang-ulang pembicaraan, tidak berbelit-belit). Terdengar percaya diri, tidak terkesan ragu dalam menyampaikan informasi atau solusi. Menggunakan bahasa baku, tidak menggunakan kata jargon; bahasa sistem, filler words (contoh : hhmm...ehh...hooh...) bahasa daerah, bahasa tidak baku (sesuai kebijakan). Tidak memotong pembicaraan pelanggan. Fokus; mampu menangkap informasi yang disampaikan pelanggan, menyapa pelanggan dengan benar (seperti Bapak/Ibu, nama dll)",
+    "weight": 5
+  },
+  {
+    "area": "Hold/Mute",
+    "parameter": "NCE",
+    "description": "Hold hanya dilakukan jika diperlukan, dengan meminta izin/persetujuan pelanggan sebelumnya dan mengucapkan terima kasih atas kesediaan pelanggan setelah menunggu. Mute dapat digunakan agent untuk kondisi bersin, batuk, sendawa. Hold maksimal 1 menit, jika perlu tambahan waktu konfirmasi kesediaan pelanggan /tawarkan untuk dihubungi kembali pada waktu yang telah disepakati",
+    "weight": 5
+  },
+  {
+    "area": "Reconfirm the Agreement",
+    "parameter": "NCE",
+    "description": "Konfirmasi nomor tiket/tindakan yang dilakukan sesuai/atas permintaan pelanggan (jika ada, sesuai kebijakan). Memastikan informasi yang disampaikan sudah jelas dan bisa diterima oleh pelanggan dan pastikan pelanggan merespon konfirmasi tersebut. Memastikan tidak ada pertanyaan atau keluhan yang masih belum terpenuhi (jika diperlukan)",
+    "weight": 5
+  },
+  {
+    "area": "Closing Greeting",
+    "parameter": "NCE",
+    "description": "Menyampaikan salam penutup dengan lengkap, jelas dan benar. (Optional ) Mengucapkan 'Magic word' untuk inquiry disesuaikan dengan kondisi dan waktu pelanggan menelpon (sesuai kebijakan). Terima kasih telah menghubungi Samsung contact center, selamat pagi/siang/sore/malam. Selamat beraktivitas kembali",
+    "weight": 3
+  }
+]
