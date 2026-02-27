@@ -1,0 +1,13 @@
+{
+  "name": "ai-transcript-apps",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev:frontend": "pnpm --filter @ai-transcript/frontend dev",
+    "dev:backend": "pnpm --filter @ai-transcript/backend dev",
+    "dev:worker": "pnpm --filter @ai-transcript/worker dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

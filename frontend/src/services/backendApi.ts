@@ -129,42 +129,31 @@ export const deleteProject = async (tenantId: string, projectId: string) => {
   return parse<{ ok: boolean }>(response);
 };
 
-export const getProjectSettings = async (projectId: string) => {
-  const response = await fetch(`${API_BASE}/projects/${projectId}/settings`, {
-    headers: withAuth(),
-  });
-  return parse<{
-    projectId: string;
-    hasElevenlabsApiKey: boolean;
-  }>(response);
-};
-
-export const updateProjectSettings = async (
-  projectId: string,
-  payload: { elevenlabsApiKey?: string },
-) => {
-  const response = await fetch(`${API_BASE}/projects/${projectId}/settings`, {
-    method: "PUT",
-    headers: withAuth({ "Content-Type": "application/json" }),
-    body: JSON.stringify(payload),
-  });
-  return parse<{ ok: boolean; hasElevenlabsApiKey: boolean }>(response);
-};
-
 export const getGlobalSettings = async () => {
   const response = await fetch(`${API_BASE}/settings/global`, {
     headers: withAuth(),
   });
-  return parse<{ hasXaiApiKey: boolean; xaiModel: string }>(response);
+  return parse<{ hasElevenlabsApiKey: boolean; hasXaiApiKey: boolean; xaiModel: string }>(
+    response,
+  );
 };
 
-export const updateGlobalSettings = async (payload: { xaiApiKey?: string; xaiModel?: string }) => {
+export const updateGlobalSettings = async (payload: {
+  elevenlabsApiKey?: string;
+  xaiApiKey?: string;
+  xaiModel?: string;
+}) => {
   const response = await fetch(`${API_BASE}/settings/global`, {
     method: "PUT",
     headers: withAuth({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
   });
-  return parse<{ ok: boolean; hasXaiApiKey: boolean; xaiModel: string }>(response);
+  return parse<{
+    ok: boolean;
+    hasElevenlabsApiKey: boolean;
+    hasXaiApiKey: boolean;
+    xaiModel: string;
+  }>(response);
 };
 
 export const createBatch = async (payload: {

@@ -4,13 +4,13 @@ import { db, pool } from "./db.js";
 import { env } from "./config.js";
 import {
   batches,
+  globalProviderSettings,
   jobAnalyses,
   jobEvaluationRows,
   jobs,
   jobSegments,
   jobTranscripts,
   projectMatrixRows,
-  projectProviderSettings,
 } from "./schema.js";
 import { transcribeAudioFile } from "./services/transcribe.js";
 import { analyzeConversation } from "./services/analyze.js";
@@ -28,17 +28,17 @@ const emitWsEvent = async (event: Record<string, unknown>) => {
   await boss.send(QUEUES.WS_EVENTS, event);
 };
 
-const getProviderConfig = async (projectId: string) => {
-  const settings = await db.query.projectProviderSettings.findFirst({
-    where: eq(projectProviderSettings.projectId, projectId),
+const getProviderConfig = async () => {
+  const settings = await db.query.globalProviderSettings.findFirst({
+    orderBy: (t, { desc }) => [desc(t.updatedAt)],
   });
 
   const elevenlabsApiKey = settings?.elevenlabsApiKey || env.ELEVENLABS_API_KEY;
   const xaiApiKey = settings?.xaiApiKey || env.XAI_API_KEY;
   const xaiModel = settings?.xaiModel || env.XAI_MODEL;
 
-  if (!elevenlabsApiKey) throw new Error("Missing ElevenLabs API key in project settings");
-  if (!xaiApiKey) throw new Error("Missing xAI API key in project settings");
+  if (!elevenlabsApiKey) throw new Error("Missing global ElevenLabs API key");
+  if (!xaiApiKey) throw new Error("Missing global xAI API key");
 
   return { elevenlabsApiKey, xaiApiKey, xaiModel };
 };
@@ -153,7 +153,7 @@ const start = async () => {
       const current = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
       if (!current) return;
 
-      const provider = await getProviderConfig(current.projectId);
+      const provider = await getProviderConfig();
 
       await updateJobStatus(jobId, "transcribing", 35);
       const transcription = await transcribeAudioFile(current.filePath, provider.elevenlabsApiKey);
@@ -197,7 +197,7 @@ const start = async () => {
       const current = await db.query.jobs.findFirst({ where: eq(jobs.id, jobId) });
       if (!current) return;
 
-      const provider = await getProviderConfig(current.projectId);
+      const provider = await getProviderConfig();
 
       await updateJobStatus(jobId, "analyzing", 78);
 

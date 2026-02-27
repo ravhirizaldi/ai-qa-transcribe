@@ -41,12 +41,12 @@ export const jobs = pgTable("jobs", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
-export const projectProviderSettings = pgTable("project_provider_settings", {
+export const globalProviderSettings = pgTable("global_provider_settings", {
   id: uuid("id").defaultRandom().primaryKey(),
-  projectId: uuid("project_id").notNull().unique(),
   elevenlabsApiKey: text("elevenlabs_api_key"),
   xaiApiKey: text("xai_api_key"),
   xaiModel: text("xai_model"),
+  updatedBy: uuid("updated_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

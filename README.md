@@ -11,7 +11,7 @@ This folder contains a multi-tenant call QA system:
 - New users are unrestricted by default and can view all tenants/projects.
 - Admin can manually restrict visibility per user to selected tenants/projects.
 - xAI API key/model are global settings used by all projects.
-- ElevenLabs API key is project-level setting.
+- ElevenLabs API key is also global and used by all projects.
 
 ## Prerequisites
 
@@ -86,7 +86,7 @@ There is no separate admin seed script. Use the bootstrap flow:
 2. Open `/manage` and create tenant/project.
 3. Open `/settings`:
    - set global xAI key/model
-   - set project ElevenLabs key
+   - set global ElevenLabs key
 4. Use `/single` or `/batch` to process recordings.
 
 ### Option B: Use API (curl)
@@ -117,22 +117,13 @@ curl -X POST http://localhost:3001/tenants/<TENANT_ID>/projects \
   -d '{"name":"CS Inbound","supportsInbound":true,"supportsOutbound":false}'
 ```
 
-Set global xAI settings:
+Set global provider settings:
 
 ```bash
 curl -X PUT http://localhost:3001/settings/global \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"xaiApiKey":"<XAI_KEY>","xaiModel":"grok-4-1-fast-non-reasoning"}'
-```
-
-Set project ElevenLabs settings:
-
-```bash
-curl -X PUT http://localhost:3001/projects/<PROJECT_ID>/settings \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"elevenlabsApiKey":"<ELEVENLABS_KEY>"}'
+  -d '{"elevenlabsApiKey":"<ELEVENLABS_KEY>","xaiApiKey":"<XAI_KEY>","xaiModel":"grok-4-1-fast-non-reasoning"}'
 ```
 
 Restrict user visibility manually (admin):

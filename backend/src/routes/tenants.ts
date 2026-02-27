@@ -13,7 +13,6 @@ import {
   projectMemberships,
   projectMatrixRows,
   projectMatrixVersions,
-  projectProviderSettings,
   projects,
   tenantMemberships,
   tenants,
@@ -51,11 +50,8 @@ const UpdateProjectSchema = z.object({
   supportsOutbound: z.boolean().optional(),
 });
 
-const ProjectSettingsSchema = z.object({
-  elevenlabsApiKey: z.string().optional(),
-});
-
 const GlobalSettingsSchema = z.object({
+  elevenlabsApiKey: z.string().optional(),
   xaiApiKey: z.string().optional(),
   xaiModel: z.string().optional(),
 });
@@ -101,7 +97,6 @@ const deleteProjectCascade = async (projectId: string) => {
   }
 
   await db.delete(projectMatrixVersions).where(eq(projectMatrixVersions.projectId, projectId));
-  await db.delete(projectProviderSettings).where(eq(projectProviderSettings.projectId, projectId));
   await db.delete(projectMemberships).where(eq(projectMemberships.projectId, projectId));
   await db.delete(projects).where(eq(projects.id, projectId));
 };
@@ -349,82 +344,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.get(
-    "/projects/:projectId/settings",
-    { preHandler: app.authenticate },
-    async (request, reply) => {
-      const params = z.object({ projectId: z.string().uuid() }).parse(request.params);
-      const project = await db.query.projects.findFirst({ where: eq(projects.id, params.projectId) });
-      if (!project) {
-        return reply.code(404).send({ message: "Project not found" });
-      }
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
-
-      const settings = await db.query.projectProviderSettings.findFirst({
-        where: eq(projectProviderSettings.projectId, params.projectId),
-      });
-
-      return {
-        projectId: params.projectId,
-        hasElevenlabsApiKey: Boolean(settings?.elevenlabsApiKey),
-      };
-    },
-  );
-
-  app.put(
-    "/projects/:projectId/settings",
-    { preHandler: app.authenticate },
-    async (request, reply) => {
-      const params = z.object({ projectId: z.string().uuid() }).parse(request.params);
-      const payload = ProjectSettingsSchema.parse(request.body);
-      const project = await db.query.projects.findFirst({ where: eq(projects.id, params.projectId) });
-      if (!project) {
-        return reply.code(404).send({ message: "Project not found" });
-      }
-
-      const actor = await assertTenantAccess(project.tenantId, (request.user as any).sub, {
-        requireMembership: true,
-      });
-      if (!actor || !["owner", "admin"].includes(actor.role)) {
-        return reply.code(403).send({ message: "Insufficient permissions" });
-      }
-
-      const existing = await db.query.projectProviderSettings.findFirst({
-        where: eq(projectProviderSettings.projectId, params.projectId),
-      });
-
-      const nextValues = {
-        elevenlabsApiKey:
-          payload.elevenlabsApiKey !== undefined
-            ? payload.elevenlabsApiKey || null
-            : existing?.elevenlabsApiKey || null,
-      };
-
-      if (existing) {
-        await db
-          .update(projectProviderSettings)
-          .set({ ...nextValues, updatedAt: new Date() })
-          .where(eq(projectProviderSettings.projectId, params.projectId));
-      } else {
-        await db.insert(projectProviderSettings).values({
-          projectId: params.projectId,
-          ...nextValues,
-        });
-      }
-
-      return {
-        ok: true,
-        hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
-      };
-    },
-  );
-
   app.get("/settings/global", { preHandler: app.authenticate }, async () => {
     const settings = await db.query.globalProviderSettings.findFirst({
       orderBy: (t, { desc }) => [desc(t.updatedAt)],
     });
 
     return {
+      hasElevenlabsApiKey: Boolean(settings?.elevenlabsApiKey),
       hasXaiApiKey: Boolean(settings?.xaiApiKey),
       xaiModel: settings?.xaiModel || "grok-4-1-fast-non-reasoning",
     };
@@ -437,6 +363,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     });
 
     const nextValues = {
+      elevenlabsApiKey:
+        payload.elevenlabsApiKey !== undefined
+          ? payload.elevenlabsApiKey || null
+          : existing?.elevenlabsApiKey || null,
       xaiApiKey:
         payload.xaiApiKey !== undefined ? payload.xaiApiKey || null : existing?.xaiApiKey || null,
       xaiModel:
@@ -457,6 +387,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
     return {
       ok: true,
+      hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
       hasXaiApiKey: Boolean(nextValues.xaiApiKey),
       xaiModel: nextValues.xaiModel,
     };
