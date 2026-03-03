@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import LoginPage from "../pages/LoginPage.vue";
 import ManagePage from "../pages/ManagePage.vue";
-import SingleQAPage from "../pages/SingleQAPage.vue";
 import BatchQAPage from "../pages/BatchQAPage.vue";
 import SettingsLayoutPage from "../pages/settings/SettingsLayoutPage.vue";
 import UsersSettingsPage from "../pages/settings/UsersSettingsPage.vue";
@@ -24,7 +23,6 @@ const router = createRouter({
         { path: "system", component: SystemSettingsPage },
       ],
     },
-    { path: "/single", component: SingleQAPage },
     { path: "/batch", component: BatchQAPage },
   ],
 });
