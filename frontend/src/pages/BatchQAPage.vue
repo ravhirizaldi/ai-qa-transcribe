@@ -199,11 +199,9 @@ const batchDashboard = computed(() => {
 });
 
 const ceNceScores = computed(() => {
-  const nceParametersCount = Math.max(
-    1,
-    activeMatrixRows.value.filter((r) => r.parameter.toUpperCase() === "NCE")
-      .length,
-  );
+  const nceParametersCount = activeMatrixRows.value.filter(
+    (r) => String(r.parameter || "").toUpperCase() === "NCE",
+  ).length;
 
   const totalSamples =
     batchDashboard.value.completed + batchDashboard.value.failed;
@@ -226,15 +224,22 @@ const ceNceScores = computed(() => {
         let jobNCEDefects = 0;
 
         for (const row of detail.analysis.evaluation_table) {
+          const parameter = String(row.parameter || "").toUpperCase();
+          const score = Number(row.score ?? 0);
+          const maxScore = Number(row.max_score ?? 0);
           if (
-            row.parameter.toUpperCase() === "CE" &&
-            row.score < row.max_score
+            parameter === "CE" &&
+            Number.isFinite(score) &&
+            Number.isFinite(maxScore) &&
+            score < maxScore
           ) {
             hasCE = true;
           }
           if (
-            row.parameter.toUpperCase() === "NCE" &&
-            row.score < row.max_score
+            parameter === "NCE" &&
+            Number.isFinite(score) &&
+            Number.isFinite(maxScore) &&
+            score < maxScore
           ) {
             jobNCEDefects += 1;
           }
@@ -242,10 +247,8 @@ const ceNceScores = computed(() => {
 
         if (hasCE) {
           ceDefectSamples += 1;
-          totalNCEDefects += nceParametersCount;
-        } else {
-          totalNCEDefects += jobNCEDefects;
         }
+        totalNCEDefects += jobNCEDefects;
       }
     }
   }
@@ -259,10 +262,7 @@ const ceNceScores = computed(() => {
       ? ((totalOpportunities - totalNCEDefects) / totalOpportunities) * 100
       : 0;
 
-  let integratedQAScore = 0;
-  if (totalSamples > 0) {
-    integratedQAScore = ceAccuracy === 100 ? nceAccuracy : 0;
-  }
+  const integratedQAScore = totalSamples > 0 ? ceAccuracy * 0.6 + nceAccuracy * 0.4 : 0;
 
   return {
     ceDefectSamples,
