@@ -46,6 +46,9 @@ const CreateProjectSchema = z.object({
   logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().default(true),
   supportsOutbound: z.boolean().default(false),
+  ceScoringPolicy: z
+    .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
+    .default("strict_zero_all_ce_if_any_fail"),
 });
 
 const UpdateProjectSchema = z.object({
@@ -53,6 +56,9 @@ const UpdateProjectSchema = z.object({
   logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().optional(),
   supportsOutbound: z.boolean().optional(),
+  ceScoringPolicy: z
+    .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
+    .optional(),
 });
 
 const GlobalSettingsSchema = z.object({
@@ -279,6 +285,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           logoUrl: payload.logoUrl ?? null,
           supportsInbound: payload.supportsInbound,
           supportsOutbound: payload.supportsOutbound,
+          ceScoringPolicy: payload.ceScoringPolicy,
         })
         .returning();
 
@@ -323,6 +330,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
             : {}),
           ...(payload.supportsOutbound !== undefined
             ? { supportsOutbound: payload.supportsOutbound }
+            : {}),
+          ...(payload.ceScoringPolicy !== undefined
+            ? { ceScoringPolicy: payload.ceScoringPolicy }
             : {}),
           updatedAt: new Date(),
         })

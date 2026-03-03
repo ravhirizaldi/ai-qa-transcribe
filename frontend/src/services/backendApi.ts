@@ -78,6 +78,9 @@ export type Project = {
   logoUrl?: string | null;
   supportsInbound: boolean;
   supportsOutbound: boolean;
+  ceScoringPolicy:
+    | "strict_zero_all_ce_if_any_fail"
+    | "weighted_ce_independent";
 };
 
 export type BatchHistoryItem = {
@@ -230,6 +233,9 @@ export const createProject = async (
     logoUrl?: string | null;
     supportsInbound: boolean;
     supportsOutbound: boolean;
+    ceScoringPolicy?:
+      | "strict_zero_all_ce_if_any_fail"
+      | "weighted_ce_independent";
   },
 ) => {
   const response = await fetch(`${API_BASE}/tenants/${tenantId}/projects`, {
@@ -248,6 +254,9 @@ export const updateProject = async (
     logoUrl?: string | null;
     supportsInbound?: boolean;
     supportsOutbound?: boolean;
+    ceScoringPolicy?:
+      | "strict_zero_all_ce_if_any_fail"
+      | "weighted_ce_independent";
   },
 ) => {
   const response = await fetch(

@@ -47,6 +47,10 @@ const projectForm = ref({
   name: "",
   logoUrl: "",
   callType: "inbound" as MatrixCallType,
+  ceScoringPolicy:
+    "strict_zero_all_ce_if_any_fail" as
+      | "strict_zero_all_ce_if_any_fail"
+      | "weighted_ce_independent",
 });
 const projectModalTenantLocked = ref(false);
 const creatingProject = ref(false);
@@ -58,7 +62,16 @@ const savingTenantEdit = ref(false);
 const uploadingEditTenantLogo = ref(false);
 
 const showEditProjectModal = ref(false);
-const editProjectForm = ref({ tenantId: "", id: "", name: "", logoUrl: "" });
+const editProjectForm = ref({
+  tenantId: "",
+  id: "",
+  name: "",
+  logoUrl: "",
+  ceScoringPolicy:
+    "strict_zero_all_ce_if_any_fail" as
+      | "strict_zero_all_ce_if_any_fail"
+      | "weighted_ce_independent",
+});
 const savingProjectEdit = ref(false);
 const uploadingEditProjectLogo = ref(false);
 
@@ -303,6 +316,7 @@ const openProjectModal = (tenantId?: string) => {
     name: "",
     logoUrl: "",
     callType: "inbound",
+    ceScoringPolicy: "strict_zero_all_ce_if_any_fail",
   };
   showProjectModal.value = true;
 };
@@ -344,6 +358,7 @@ const createProjectAction = async () => {
       logoUrl: projectForm.value.logoUrl.trim() || null,
       supportsInbound: projectForm.value.callType === "inbound",
       supportsOutbound: projectForm.value.callType === "outbound",
+      ceScoringPolicy: projectForm.value.ceScoringPolicy,
     });
     projectsByTenant.value = {
       ...projectsByTenant.value,
@@ -607,6 +622,8 @@ const openEditProjectModal = (project: Project) => {
     id: project.id,
     name: project.name,
     logoUrl: project.logoUrl || "",
+    ceScoringPolicy:
+      project.ceScoringPolicy || "strict_zero_all_ce_if_any_fail",
   };
   showEditProjectModal.value = true;
 };
@@ -645,6 +662,7 @@ const saveProjectEdit = async () => {
       {
         name: editProjectForm.value.name.trim(),
         logoUrl: editProjectForm.value.logoUrl.trim() || null,
+        ceScoringPolicy: editProjectForm.value.ceScoringPolicy,
       },
     );
     projectsByTenant.value = {
@@ -1125,6 +1143,21 @@ onMounted(async () => {
             Outbound</label
           >
         </div>
+        <label class="msg-muted" for="project-ce-scoring-policy"
+          >CE Scoring Policy</label
+        >
+        <select
+          id="project-ce-scoring-policy"
+          v-model="projectForm.ceScoringPolicy"
+          class="input"
+        >
+          <option value="strict_zero_all_ce_if_any_fail">
+            Strict (zero all CE if one fails)
+          </option>
+          <option value="weighted_ce_independent">
+            Weighted (independent CE scores)
+          </option>
+        </select>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showProjectModal = false">
             Cancel
@@ -1214,6 +1247,16 @@ onMounted(async () => {
                       : ""
                   }}
                   {{ project.supportsOutbound ? "Outbound" : "" }}
+                  {{
+                    (project.supportsInbound || project.supportsOutbound)
+                      ? " | "
+                      : ""
+                  }}
+                  {{
+                    project.ceScoringPolicy === "weighted_ce_independent"
+                      ? "CE Weighted"
+                      : "CE Strict"
+                  }}
                 </p>
                 </div>
               </div>
@@ -1541,6 +1584,21 @@ onMounted(async () => {
             </label>
           </div>
         </div>
+        <label class="msg-muted" for="edit-project-ce-scoring-policy"
+          >CE Scoring Policy</label
+        >
+        <select
+          id="edit-project-ce-scoring-policy"
+          v-model="editProjectForm.ceScoringPolicy"
+          class="input"
+        >
+          <option value="strict_zero_all_ce_if_any_fail">
+            Strict (zero all CE if one fails)
+          </option>
+          <option value="weighted_ce_independent">
+            Weighted (independent CE scores)
+          </option>
+        </select>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditProjectModal = false">
             Cancel

@@ -10,6 +10,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 export const callTypeEnum = pgEnum("call_type", ["inbound", "outbound"]);
+export const ceScoringPolicyEnum = pgEnum("ce_scoring_policy", [
+  "strict_zero_all_ce_if_any_fail",
+  "weighted_ce_independent",
+]);
 export const statusEnum = pgEnum("job_status", [
   "queued",
   "uploading",
@@ -55,6 +59,11 @@ export const batches = pgTable("batches", {
   id: uuid("id").defaultRandom().primaryKey(),
   status: statusEnum("status").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+export const projects = pgTable("projects", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  ceScoringPolicy: ceScoringPolicyEnum("ce_scoring_policy").notNull(),
 });
 
 export const projectMatrixRows = pgTable("project_matrix_rows", {

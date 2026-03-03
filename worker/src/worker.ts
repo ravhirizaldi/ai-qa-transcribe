@@ -13,6 +13,7 @@ import {
   jobs,
   jobSegments,
   jobTranscripts,
+  projects,
   projectMatrixRows,
 } from "./schema.js";
 import { transcribeAudioFile } from "./services/transcribe.js";
@@ -24,6 +25,9 @@ const QUEUES = {
   FINALIZE: "job.finalize",
   WS_EVENTS: "ws.events",
 } as const;
+
+const STRICT_CE_POLICY = "strict_zero_all_ce_if_any_fail" as const;
+const WEIGHTED_CE_POLICY = "weighted_ce_independent" as const;
 
 const boss = new PgBoss({ connectionString: env.DATABASE_URL });
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -250,6 +254,14 @@ const start = async () => {
         where: eq(projectMatrixRows.matrixVersionId, current.matrixVersionId),
         orderBy: (t, { asc }) => [asc(t.rowIndex)],
       });
+      const project = await db.query.projects.findFirst({
+        where: eq(projects.id, current.projectId),
+        columns: { ceScoringPolicy: true },
+      });
+      const ceScoringPolicy =
+        project?.ceScoringPolicy === WEIGHTED_CE_POLICY
+          ? WEIGHTED_CE_POLICY
+          : STRICT_CE_POLICY;
 
       const result = await analyzeConversation(
         segments.map((seg, idx) => ({
@@ -270,6 +282,27 @@ const start = async () => {
         provider.xaiModel,
         { jobId, batchId: current.batchId },
       );
+      const adjustedEvaluationTable = result.qa_scorecard.evaluation_table.map(
+        (row) => ({ ...row }),
+      );
+      const hasCeDefect = adjustedEvaluationTable.some((row) => {
+        if (String(row.parameter || "").toUpperCase() !== "CE") return false;
+        const score = Number(row.score ?? 0);
+        const maxScore = Number(row.max_score ?? 0);
+        if (!Number.isFinite(score) || !Number.isFinite(maxScore)) return false;
+        return score < maxScore;
+      });
+      if (ceScoringPolicy === STRICT_CE_POLICY && hasCeDefect) {
+        for (const row of adjustedEvaluationTable) {
+          if (String(row.parameter || "").toUpperCase() === "CE") {
+            row.score = 0;
+          }
+        }
+      }
+      const adjustedScorecard = {
+        ...result.qa_scorecard,
+        evaluation_table: adjustedEvaluationTable,
+      };
 
       for (let idx = 0; idx < segments.length; idx++) {
         const cleaned = result.transcript_cleanup.find((c) => c.id === idx);
@@ -284,7 +317,7 @@ const start = async () => {
           .where(and(eq(jobSegments.jobId, jobId), eq(jobSegments.segmentIndex, idx)));
       }
 
-      const totalScore = result.qa_scorecard.evaluation_table.reduce(
+      const totalScore = adjustedEvaluationTable.reduce(
         (sum, row) => sum + Number(row.score || 0),
         0,
       );
@@ -295,11 +328,11 @@ const start = async () => {
         routing: result.qa_scorecard.routing,
         redFlags: result.qa_scorecard.red_flags,
         totalScore,
-        rawJson: result.qa_scorecard,
+        rawJson: adjustedScorecard,
       });
 
       await db.insert(jobEvaluationRows).values(
-        result.qa_scorecard.evaluation_table.map((row, idx) => ({
+        adjustedEvaluationTable.map((row, idx) => ({
           jobId,
           rowIndex: idx,
           area: row.area,

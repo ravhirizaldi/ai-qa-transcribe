@@ -122,6 +122,7 @@ Rules:
   - Do not repeat area/parameter/description in output.
   - score must be strictly 0 OR max_weight for that row.
   - If not applicable, use note "N/A" and give full score.
+- Important: final CE scoring policy can be applied server-side after your output.
 - evidence_timestamp: copy exact "MM:SS - MM:SS" from transcript lines, otherwise "N/A".
 - Keep summary and notes short, factual, and evidence-based.
 `,

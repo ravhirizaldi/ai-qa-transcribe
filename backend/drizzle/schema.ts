@@ -20,6 +20,10 @@ export const tenantRoleEnum = pgEnum("tenant_role", [
 ]);
 
 export const callTypeEnum = pgEnum("call_type", ["inbound", "outbound"]);
+export const ceScoringPolicyEnum = pgEnum("ce_scoring_policy", [
+  "strict_zero_all_ce_if_any_fail",
+  "weighted_ce_independent",
+]);
 
 export const statusEnum = pgEnum("job_status", [
   "queued",
@@ -94,6 +98,9 @@ export const projects = pgTable(
     logoUrl: text("logo_url"),
     supportsInbound: boolean("supports_inbound").default(true).notNull(),
     supportsOutbound: boolean("supports_outbound").default(false).notNull(),
+    ceScoringPolicy: ceScoringPolicyEnum("ce_scoring_policy")
+      .default("strict_zero_all_ce_if_any_fail")
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
