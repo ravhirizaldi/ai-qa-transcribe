@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
-import { MoreVertical } from "lucide-vue-next";
+import { Image as ImageIcon, MoreVertical } from "lucide-vue-next";
 import {
   activateMatrixVersion,
   createMatrixVersion,
@@ -17,6 +17,7 @@ import {
   listTenants,
   updateProject,
   updateTenant,
+  uploadImage,
   type MatrixCallType,
   type MatrixRow,
   type MatrixVersion,
@@ -38,23 +39,28 @@ const errorMessage = ref("");
 const showTenantModal = ref(false);
 const tenantForm = ref({ name: "", logoUrl: "" });
 const creatingTenant = ref(false);
+const uploadingTenantLogo = ref(false);
 
 const showProjectModal = ref(false);
 const projectForm = ref({
   tenantId: "",
   name: "",
+  logoUrl: "",
   callType: "inbound" as MatrixCallType,
 });
 const projectModalTenantLocked = ref(false);
 const creatingProject = ref(false);
+const uploadingProjectLogo = ref(false);
 
 const showEditTenantModal = ref(false);
-const editTenantForm = ref({ id: "", name: "" });
+const editTenantForm = ref({ id: "", name: "", logoUrl: "" });
 const savingTenantEdit = ref(false);
+const uploadingEditTenantLogo = ref(false);
 
 const showEditProjectModal = ref(false);
-const editProjectForm = ref({ tenantId: "", id: "", name: "" });
+const editProjectForm = ref({ tenantId: "", id: "", name: "", logoUrl: "" });
 const savingProjectEdit = ref(false);
+const uploadingEditProjectLogo = ref(false);
 
 const showConfirmModal = ref(false);
 const confirmTitle = ref("");
@@ -245,6 +251,26 @@ const openTenantModal = () => {
   showTenantModal.value = true;
 };
 
+const handleCreateTenantLogoUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  uploadingTenantLogo.value = true;
+  try {
+    const { path } = await uploadImage(file);
+    tenantForm.value.logoUrl = path;
+    toast.success("Tenant logo uploaded");
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to upload tenant logo",
+    );
+  } finally {
+    uploadingTenantLogo.value = false;
+    target.value = "";
+  }
+};
+
 const createTenantAction = async () => {
   if (!tenantForm.value.name.trim()) {
     toast.error("Tenant name is required");
@@ -275,9 +301,30 @@ const openProjectModal = (tenantId?: string) => {
   projectForm.value = {
     tenantId: tenantId || workspaceTenantId.value || tenants.value[0]?.id || "",
     name: "",
+    logoUrl: "",
     callType: "inbound",
   };
   showProjectModal.value = true;
+};
+
+const handleCreateProjectLogoUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  uploadingProjectLogo.value = true;
+  try {
+    const { path } = await uploadImage(file);
+    projectForm.value.logoUrl = path;
+    toast.success("Project logo uploaded");
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to upload project logo",
+    );
+  } finally {
+    uploadingProjectLogo.value = false;
+    target.value = "";
+  }
 };
 
 const createProjectAction = async () => {
@@ -294,6 +341,7 @@ const createProjectAction = async () => {
   try {
     const project = await createProject(projectForm.value.tenantId, {
       name: projectForm.value.name.trim(),
+      logoUrl: projectForm.value.logoUrl.trim() || null,
       supportsInbound: projectForm.value.callType === "inbound",
       supportsOutbound: projectForm.value.callType === "outbound",
     });
@@ -361,6 +409,64 @@ const syncUrlWithWorkspace = async () => {
   syncingRoute.value = false;
 };
 
+const apiBaseUrl = (
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:3001"
+).replace(/\/$/, "");
+const logoBgColors = ref<Record<string, string>>({});
+
+const resolveProjectLogoUrl = (logoUrl?: string | null) => {
+  if (!logoUrl) return "";
+  if (logoUrl.startsWith("http://") || logoUrl.startsWith("https://")) {
+    return logoUrl;
+  }
+  return `${apiBaseUrl}${logoUrl.startsWith("/") ? logoUrl : `/${logoUrl}`}`;
+};
+
+const resolveTenantLogoUrl = (logoUrl?: string | null) =>
+  resolveProjectLogoUrl(logoUrl);
+
+const getLogoBgStyle = (src: string) => ({
+  backgroundColor: logoBgColors.value[src] || "rgba(2, 6, 23, 0.65)",
+});
+
+const applyDominantLogoColor = (event: Event) => {
+  const img = event.target as HTMLImageElement;
+  const src = img.currentSrc || img.src;
+  if (!src || logoBgColors.value[src]) return;
+
+  try {
+    const canvas = document.createElement("canvas");
+    const size = 24;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(img, 0, 0, size, size);
+    const { data } = ctx.getImageData(0, 0, size, size);
+
+    let rSum = 0;
+    let gSum = 0;
+    let bSum = 0;
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha < 40) continue;
+      rSum += data[i];
+      gSum += data[i + 1];
+      bSum += data[i + 2];
+      count += 1;
+    }
+    if (!count) return;
+
+    const r = Math.round(rSum / count);
+    const g = Math.round(gSum / count);
+    const b = Math.round(bSum / count);
+    logoBgColors.value[src] = `rgba(${r}, ${g}, ${b}, 0.3)`;
+  } catch {
+    // Ignore extraction errors (for example, tainted canvas).
+  }
+};
+
 const clearWorkspaceParams = async () => {
   syncingRoute.value = true;
   await router.replace({ path: "/manage", query: {} });
@@ -391,8 +497,32 @@ const openWorkspaceById = async (
 };
 
 const openEditTenantModal = (tenant: Tenant) => {
-  editTenantForm.value = { id: tenant.id, name: tenant.name };
+  editTenantForm.value = {
+    id: tenant.id,
+    name: tenant.name,
+    logoUrl: tenant.logoUrl || "",
+  };
   showEditTenantModal.value = true;
+};
+
+const handleEditTenantLogoUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  uploadingEditTenantLogo.value = true;
+  try {
+    const { path } = await uploadImage(file);
+    editTenantForm.value.logoUrl = path;
+    toast.success("Tenant logo uploaded");
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to upload tenant logo",
+    );
+  } finally {
+    uploadingEditTenantLogo.value = false;
+    target.value = "";
+  }
 };
 
 const saveTenantEdit = async () => {
@@ -405,6 +535,7 @@ const saveTenantEdit = async () => {
   try {
     const updated = await updateTenant(editTenantForm.value.id, {
       name: editTenantForm.value.name.trim(),
+      logoUrl: editTenantForm.value.logoUrl.trim() || null,
     });
     tenants.value = tenants.value.map((item) =>
       item.id === updated.id ? updated : item,
@@ -475,8 +606,29 @@ const openEditProjectModal = (project: Project) => {
     tenantId: project.tenantId,
     id: project.id,
     name: project.name,
+    logoUrl: project.logoUrl || "",
   };
   showEditProjectModal.value = true;
+};
+
+const handleEditProjectLogoUpload = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  uploadingEditProjectLogo.value = true;
+  try {
+    const { path } = await uploadImage(file);
+    editProjectForm.value.logoUrl = path;
+    toast.success("Project logo uploaded");
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to upload project logo",
+    );
+  } finally {
+    uploadingEditProjectLogo.value = false;
+    target.value = "";
+  }
 };
 
 const saveProjectEdit = async () => {
@@ -492,6 +644,7 @@ const saveProjectEdit = async () => {
       editProjectForm.value.id,
       {
         name: editProjectForm.value.name.trim(),
+        logoUrl: editProjectForm.value.logoUrl.trim() || null,
       },
     );
     projectsByTenant.value = {
@@ -842,11 +995,30 @@ onMounted(async () => {
         class="tenant-card"
         @click="openTenantWorkspace(tenant)"
       >
-        <div>
-          <p class="tenant-name">{{ tenant.name }}</p>
-          <p class="tenant-meta">
-            {{ (projectsByTenant[tenant.id] || []).length }} projects
-          </p>
+        <div class="project-main">
+          <div
+            class="project-logo"
+            :style="
+              tenant.logoUrl
+                ? getLogoBgStyle(resolveTenantLogoUrl(tenant.logoUrl))
+                : undefined
+            "
+          >
+            <img
+              v-if="tenant.logoUrl"
+              :src="resolveTenantLogoUrl(tenant.logoUrl)"
+              :alt="`${tenant.name} logo`"
+              crossorigin="anonymous"
+              @load="applyDominantLogoColor"
+            />
+            <ImageIcon v-else class="w-4 h-4" />
+          </div>
+          <div>
+            <p class="tenant-name">{{ tenant.name }}</p>
+            <p class="tenant-meta">
+              {{ (projectsByTenant[tenant.id] || []).length }} projects
+            </p>
+          </div>
         </div>
         <div class="tenant-card-actions" @click.stop>
           <button class="btn-ghost" @click="openEditTenantModal(tenant)">
@@ -870,8 +1042,17 @@ onMounted(async () => {
         <input
           v-model="tenantForm.logoUrl"
           class="input"
-          placeholder="Logo URL (optional)"
+          placeholder="/uploads/images/tenant-logo.png"
         />
+        <label class="btn-ghost btn-file">
+          <input
+            type="file"
+            accept="image/*"
+            :disabled="uploadingTenantLogo"
+            @change="handleCreateTenantLogoUpload"
+          />
+          {{ uploadingTenantLogo ? "Uploading Logo..." : "Upload Logo" }}
+        </label>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showTenantModal = false">
             Cancel
@@ -905,6 +1086,25 @@ onMounted(async () => {
           class="input"
           placeholder="Project name"
         />
+        <div class="project-logo-field">
+          <label class="msg-muted">Project logo</label>
+          <div class="project-logo-input-row">
+            <input
+              v-model="projectForm.logoUrl"
+              class="input"
+              placeholder="/uploads/images/project-logo.png"
+            />
+            <label class="btn-ghost btn-file">
+              <input
+                type="file"
+                accept="image/*"
+                :disabled="uploadingProjectLogo"
+                @change="handleCreateProjectLogoUpload"
+              />
+              {{ uploadingProjectLogo ? "Uploading..." : "Upload" }}
+            </label>
+          </div>
+        </div>
         <div class="checks-row">
           <label
             ><input
@@ -986,7 +1186,25 @@ onMounted(async () => {
               role="button"
               tabindex="0"
             >
-              <div>
+              <div class="project-main">
+                <div
+                  class="project-logo"
+                  :style="
+                    project.logoUrl
+                      ? getLogoBgStyle(resolveProjectLogoUrl(project.logoUrl))
+                      : undefined
+                  "
+                >
+                  <img
+                    v-if="project.logoUrl"
+                    :src="resolveProjectLogoUrl(project.logoUrl)"
+                    :alt="`${project.name} logo`"
+                    crossorigin="anonymous"
+                    @load="applyDominantLogoColor"
+                  />
+                  <ImageIcon v-else class="w-4 h-4" />
+                </div>
+                <div>
                 <p class="project-name">{{ project.name }}</p>
                 <p class="project-meta">
                   {{ project.supportsInbound ? "Inbound" : "" }}
@@ -997,6 +1215,7 @@ onMounted(async () => {
                   }}
                   {{ project.supportsOutbound ? "Outbound" : "" }}
                 </p>
+                </div>
               </div>
               <div class="tenant-card-actions" @click.stop>
                 <button
@@ -1264,6 +1483,22 @@ onMounted(async () => {
           class="input"
           placeholder="Tenant name"
         />
+        <input
+          v-model="editTenantForm.logoUrl"
+          class="input"
+          placeholder="/uploads/images/tenant-logo.png"
+        />
+        <label class="btn-ghost btn-file">
+          <input
+            type="file"
+            accept="image/*"
+            :disabled="uploadingEditTenantLogo"
+            @change="handleEditTenantLogoUpload"
+          />
+          {{
+            uploadingEditTenantLogo ? "Uploading Logo..." : "Upload Logo"
+          }}
+        </label>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditTenantModal = false">
             Cancel
@@ -1287,6 +1522,25 @@ onMounted(async () => {
           class="input"
           placeholder="Project name"
         />
+        <div class="project-logo-field">
+          <label class="msg-muted">Project logo</label>
+          <div class="project-logo-input-row">
+            <input
+              v-model="editProjectForm.logoUrl"
+              class="input"
+              placeholder="/uploads/images/project-logo.png"
+            />
+            <label class="btn-ghost btn-file">
+              <input
+                type="file"
+                accept="image/*"
+                :disabled="uploadingEditProjectLogo"
+                @change="handleEditProjectLogoUpload"
+              />
+              {{ uploadingEditProjectLogo ? "Uploading..." : "Upload" }}
+            </label>
+          </div>
+        </div>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditProjectModal = false">
             Cancel
@@ -1548,6 +1802,34 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: center;
   gap: 0.5rem;
+}
+
+.project-main {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.project-logo {
+  width: 2.25rem;
+  aspect-ratio: 1 / 1;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  background: rgba(2, 6, 23, 0.65);
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.project-logo img {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+  object-position: center center;
 }
 
 .project-row-active {
@@ -1877,6 +2159,31 @@ onMounted(async () => {
   gap: 0.8rem;
   color: #cbd5e1;
   font-size: 0.82rem;
+}
+
+.project-logo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.project-logo-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-file {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-file input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .btn-primary {

@@ -16,6 +16,7 @@ const props = defineProps<{
   file: File | null;
   audioUrl?: string | null;
   isMaximized?: boolean;
+  showResize?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -24,7 +25,6 @@ const emit = defineEmits<{
 
 const waveformContainer = ref<HTMLElement | null>(null);
 const chatContainer = ref<HTMLElement | null>(null);
-const audioElement = ref<HTMLAudioElement | null>(null);
 const wavesurfer = ref<WaveSurfer | null>(null);
 const isPlaying = ref(false);
 const currentTime = ref(0);
@@ -69,11 +69,8 @@ const initWaveSurfer = () => {
     barGap: 3,
     height: 72,
     normalize: true,
+    interact: false,
   };
-
-  if (audioElement.value) {
-    options.media = audioElement.value;
-  }
 
   wavesurfer.value = WaveSurfer.create(options);
 
@@ -102,15 +99,7 @@ const togglePlay = () => {
   if (wavesurfer.value && isWaveReady.value) {
     isPlaying.value = !isPlaying.value;
     wavesurfer.value.playPause();
-    return;
-  }
-
-  if (!audioElement.value) return;
-  if (audioElement.value.paused) {
-    void audioElement.value.play();
-    isPlaying.value = true;
   } else {
-    audioElement.value.pause();
     isPlaying.value = false;
   }
 };
@@ -136,18 +125,38 @@ const scrollToSegment = (idx: number) => {
   }
 };
 
-const jumpToSegment = (start: number) => {
+const seekAndPlay = (seconds: number) => {
+  const maxDuration = duration.value || wavesurfer.value?.getDuration() || seconds;
+  const target = Math.max(0, Math.min(maxDuration, seconds));
+
   if (wavesurfer.value && isWaveReady.value) {
-    wavesurfer.value.setTime(start);
+    wavesurfer.value.setTime(target);
     wavesurfer.value.play();
     isPlaying.value = true;
-    return;
   }
-  if (audioElement.value) {
-    audioElement.value.currentTime = start;
-    void audioElement.value.play();
-    isPlaying.value = true;
-  }
+
+  currentTime.value = target;
+  updateActiveSegment(target);
+};
+
+const onWaveformClick = (event: MouseEvent) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const el = waveformContainer.value;
+  if (!el) return;
+  const totalDuration = duration.value || wavesurfer.value?.getDuration() || 0;
+  if (!totalDuration) return;
+
+  const rect = el.getBoundingClientRect();
+  if (!rect.width) return;
+
+  const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const target = ratio * totalDuration;
+  seekAndPlay(target);
+};
+
+const jumpToSegment = (start: number) => {
+  seekAndPlay(start);
 };
 
 const isWordActive = (start: number, end: number) => {
@@ -158,17 +167,6 @@ const formatTime = (seconds: number) => {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
-};
-
-const onAudioLoadedMetadata = (event: Event) => {
-  const el = event.currentTarget as HTMLAudioElement | null;
-  duration.value = Number(el?.duration || 0);
-};
-
-const onAudioTimeUpdate = (event: Event) => {
-  const el = event.currentTarget as HTMLAudioElement | null;
-  currentTime.value = Number(el?.currentTime || 0);
-  updateActiveSegment(currentTime.value);
 };
 
 onMounted(() => {
@@ -191,6 +189,10 @@ onUnmounted(() => {
     localFileUrl = null;
   }
 });
+
+defineExpose({
+  seekTo: (seconds: number) => seekAndPlay(seconds),
+});
 </script>
 
 <template>
@@ -207,6 +209,7 @@ onUnmounted(() => {
             {{ segments.length }} segments
           </div>
           <button
+            v-if="showResize !== false"
             @click="emit('toggle-maximize')"
             class="p-1.5 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-cyan-300 transition-colors"
             :title="isMaximized ? 'Minimize' : 'Maximize'"
@@ -237,22 +240,14 @@ onUnmounted(() => {
             ></div>
             Loading waveform...
           </div>
-          <div v-show="isWaveReady" ref="waveformContainer" class="h-16"></div>
+          <div
+            v-show="isWaveReady"
+            ref="waveformContainer"
+            class="h-16"
+            @click="onWaveformClick"
+          ></div>
         </div>
       </div>
-
-      <audio
-        ref="audioElement"
-        class="hidden"
-        :src="resolvedAudioUrl || undefined"
-        controls
-        preload="metadata"
-        @loadedmetadata="onAudioLoadedMetadata"
-        @timeupdate="onAudioTimeUpdate"
-        @play="isPlaying = true"
-        @pause="isPlaying = false"
-        @ended="isPlaying = false"
-      ></audio>
 
       <div
         class="flex items-center gap-1.5 mt-2 text-xs text-slate-300/80 font-mono"

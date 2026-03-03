@@ -12,6 +12,10 @@ node_modules/
 dist/
 **/dist/
 
+# Runtime uploads
+backend/uploads/
+**/uploads/
+
 # OS/editor
 .DS_Store
 .vscode/

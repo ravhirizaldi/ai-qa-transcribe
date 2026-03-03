@@ -13,25 +13,39 @@ import {
   jobTranscripts,
   projects,
 } from "../../drizzle/schema.js";
-import { assertProjectAccess, getActiveMatrixVersion } from "../repos/access.js";
+import {
+  assertProjectAccess,
+  assertProjectPermission,
+  getActiveMatrixVersion,
+} from "../repos/access.js";
 import { deleteUploadFile, saveUpload } from "../storage.js";
 import { boss, QUEUES } from "../queue.js";
 type CallType = "inbound" | "outbound";
+const ACTIVE_JOB_STATUSES = ["queued", "uploading", "transcribing", "analyzing"] as const;
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
+  const hasActiveJobsInBatch = async (batchId: string) => {
+    const activeJob = await db.query.jobs.findFirst({
+      where: and(eq(jobs.batchId, batchId), inArray(jobs.status, [...ACTIVE_JOB_STATUSES])),
+      columns: { id: true },
+    });
+    return Boolean(activeJob);
+  };
+
   app.get(
     "/projects/:projectId/batches",
     { preHandler: app.authenticate },
     async (request, reply) => {
+      const userId = (request.user as any).sub as string;
       const params = z.object({ projectId: z.string().uuid() }).parse(request.params);
       const project = await db.query.projects.findFirst({ where: eq(projects.id, params.projectId) });
       if (!project) {
         return reply.code(404).send({ message: "Project not found" });
       }
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, userId, "jobs:view");
 
       const projectBatches = await db.query.batches.findMany({
-        where: and(eq(batches.projectId, params.projectId), eq(batches.userId, (request.user as any).sub)),
+        where: eq(batches.projectId, params.projectId),
         orderBy: (t, { desc }) => [desc(t.createdAt)],
       });
 
@@ -80,6 +94,12 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         payload.tenantId,
         params.projectId,
         (request.user as any).sub,
+      );
+      await assertProjectPermission(
+        payload.tenantId,
+        params.projectId,
+        (request.user as any).sub,
+        "jobs:manage",
       );
 
       const supportsCallType =
@@ -142,6 +162,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       projectUuid,
       (request.user as any).sub,
     );
+    await assertProjectPermission(tenantUuid, projectUuid, (request.user as any).sub, "jobs:manage");
 
     const supportsCallType =
       (callType === "inbound" && project.supportsInbound) ||
@@ -202,10 +223,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     let analyzeNow = true;
 
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
-    if (!batch || batch.userId !== (request.user as any).sub) {
+    if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
 
+    await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
     const project = await assertProjectAccess(batch.tenantId, batch.projectId, (request.user as any).sub);
     const supportsCallType =
       (batch.callType === "inbound" && project.supportsInbound) ||
@@ -274,9 +296,10 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
   app.post("/batches/:batchId/analyze", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
-    if (!batch || batch.userId !== (request.user as any).sub) {
+    if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
+    await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
 
     const queuedJobs = await db.query.jobs.findMany({
       where: and(eq(jobs.batchId, batch.id), eq(jobs.status, "queued")),
@@ -305,11 +328,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
   app.delete("/batches/:batchId", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
-    if (!batch || batch.userId !== (request.user as any).sub) {
+    if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
 
-    await assertProjectAccess(batch.tenantId, batch.projectId, (request.user as any).sub);
+    await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
 
     const batchJobs = await db.query.jobs.findMany({
       where: eq(jobs.batchId, batch.id),
@@ -317,15 +340,16 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     });
 
     const isEmptyBatch = batchJobs.length === 0;
-    const isAllFailedBatch = batchJobs.length > 0 && batchJobs.every((job) => job.status === "failed");
-
-    if (!isEmptyBatch && !isAllFailedBatch) {
+    const hasActiveJobs = batchJobs.some((job) =>
+      ACTIVE_JOB_STATUSES.includes(job.status as (typeof ACTIVE_JOB_STATUSES)[number]),
+    );
+    if (!isEmptyBatch && hasActiveJobs) {
       return reply
         .code(409)
-        .send({ message: "Batch can be deleted only when empty or all recordings are failed" });
+        .send({ message: "Batch can be deleted only when queue is empty and all recordings are processed" });
     }
 
-    if (isAllFailedBatch) {
+    if (!isEmptyBatch) {
       const jobIds = batchJobs.map((job) => job.id);
 
       for (const job of batchJobs) {
@@ -344,12 +368,14 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/batches/:batchId", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
 
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
-    if (!batch || batch.userId !== (request.user as any).sub) {
+    if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
+    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:view");
 
     const batchJobs = await db.query.jobs.findMany({
       where: eq(jobs.batchId, params.batchId),
@@ -375,12 +401,14 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/jobs", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
     const query = z.object({ batchId: z.string().uuid() }).parse(request.query);
 
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, query.batchId) });
-    if (!batch || batch.userId !== (request.user as any).sub) {
+    if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
+    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:view");
 
     const list = await db.query.jobs.findMany({
       where: eq(jobs.batchId, query.batchId),
@@ -391,12 +419,18 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/jobs/:jobId", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
     const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
 
     const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
-    if (!job || job.userId !== (request.user as any).sub) {
+    if (!job) {
       return reply.code(404).send({ message: "Job not found" });
     }
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "jobs:view");
+    const batch = await db.query.batches.findFirst({
+      where: eq(batches.id, job.batchId),
+      columns: { id: true, userId: true },
+    });
 
     const [transcript, segments, analysis, rows] = await Promise.all([
       db.query.jobTranscripts.findFirst({ where: eq(jobTranscripts.jobId, job.id) }),
@@ -465,11 +499,15 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
-    if (!job || job.userId !== userId) {
+    if (!job) {
       return reply.code(404).send({ message: "Job not found" });
     }
 
-    await assertProjectAccess(job.tenantId, job.projectId, userId);
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "jobs:view");
+    const batch = await db.query.batches.findFirst({
+      where: eq(batches.id, job.batchId),
+      columns: { id: true, userId: true },
+    });
 
     const ext = extname(job.fileName).toLowerCase();
     const contentType =
@@ -496,17 +534,27 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
 
     const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
-    if (!job || job.userId !== (request.user as any).sub) {
+    if (!job) {
       return reply.code(404).send({ message: "Job not found" });
     }
 
-    await assertProjectAccess(job.tenantId, job.projectId, (request.user as any).sub);
+    await assertProjectPermission(job.tenantId, job.projectId, (request.user as any).sub, "jobs:manage");
 
-    if (!["queued", "uploading"].includes(job.status)) {
-      return reply.code(409).send({ message: "Only unprocessed recordings can be deleted" });
+    if (
+      ACTIVE_JOB_STATUSES.includes(
+        job.status as (typeof ACTIVE_JOB_STATUSES)[number],
+      )
+    ) {
+      return reply
+        .code(409)
+        .send({ message: "Recording cannot be deleted while it is being processed" });
     }
 
     await deleteUploadFile(job.filePath);
+    await db.delete(jobEvaluationRows).where(eq(jobEvaluationRows.jobId, job.id));
+    await db.delete(jobAnalyses).where(eq(jobAnalyses.jobId, job.id));
+    await db.delete(jobSegments).where(eq(jobSegments.jobId, job.id));
+    await db.delete(jobTranscripts).where(eq(jobTranscripts.jobId, job.id));
     await db.delete(jobs).where(eq(jobs.id, job.id));
 
     return { ok: true };
@@ -516,11 +564,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
 
     const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
-    if (!job || job.userId !== (request.user as any).sub) {
+    if (!job) {
       return reply.code(404).send({ message: "Job not found" });
     }
 
-    await assertProjectAccess(job.tenantId, job.projectId, (request.user as any).sub);
+    await assertProjectPermission(job.tenantId, job.projectId, (request.user as any).sub, "jobs:manage");
 
     if (job.status !== "failed") {
       return reply.code(409).send({ message: "Only failed recording can be retried" });

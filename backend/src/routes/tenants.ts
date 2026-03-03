@@ -1,7 +1,11 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { access } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { extname, resolve } from "node:path";
 import { z } from "zod";
 import type { FastifyPluginAsync } from "fastify";
 import { db } from "../db.js";
+import { env } from "../config.js";
 import {
   batches,
   globalProviderSettings,
@@ -25,25 +29,28 @@ import {
   listAccessibleTenants,
 } from "../repos/access.js";
 import { toSlug } from "../utils/slug.js";
+import { saveImageUpload } from "../storage.js";
 
 const CreateTenantSchema = z.object({
   name: z.string().min(2),
-  logoUrl: z.string().url().nullable().optional(),
+  logoUrl: z.string().trim().min(1).nullable().optional(),
 });
 
 const UpdateTenantSchema = z.object({
   name: z.string().min(2).optional(),
-  logoUrl: z.string().url().nullable().optional(),
+  logoUrl: z.string().trim().min(1).nullable().optional(),
 });
 
 const CreateProjectSchema = z.object({
   name: z.string().min(2),
+  logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().default(true),
   supportsOutbound: z.boolean().default(false),
 });
 
 const UpdateProjectSchema = z.object({
   name: z.string().min(2).optional(),
+  logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().optional(),
   supportsOutbound: z.boolean().optional(),
 });
@@ -100,6 +107,49 @@ const deleteProjectCascade = async (projectId: string) => {
 };
 
 export const tenantRoutes: FastifyPluginAsync = async (app) => {
+  const imageMimeTypes: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+  };
+
+  app.post("/uploads/images", { preHandler: app.authenticate }, async (request, reply) => {
+    const file = await request.file();
+    if (!file) {
+      return reply.code(400).send({ message: "No file uploaded" });
+    }
+
+    if (!file.mimetype || !file.mimetype.startsWith("image/")) {
+      return reply.code(400).send({ message: "Only image files are allowed" });
+    }
+
+    const saved = await saveImageUpload(file);
+    return { path: saved.publicPath };
+  });
+
+  app.get("/uploads/images/:fileName", async (request, reply) => {
+    const params = z.object({ fileName: z.string().min(1) }).parse(request.params);
+    if (!/^[a-zA-Z0-9._-]+$/.test(params.fileName)) {
+      return reply.code(400).send({ message: "Invalid file name" });
+    }
+
+    const filePath = resolve(env.UPLOAD_DIR, "images", params.fileName);
+    try {
+      await access(filePath);
+    } catch {
+      return reply.code(404).send({ message: "File not found" });
+    }
+
+    reply.header("Cache-Control", "public, max-age=86400");
+    reply.type(imageMimeTypes[extname(params.fileName).toLowerCase()] || "application/octet-stream");
+    return reply.send(createReadStream(filePath));
+  });
+
   app.get("/tenants", { preHandler: app.authenticate }, async (request) => {
     const rows = await listAccessibleTenants((request.user as any).sub);
     return rows.map((row) => ({
@@ -226,6 +276,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           tenantId: params.tenantId,
           name: payload.name,
           slug: toSlug(payload.name),
+          logoUrl: payload.logoUrl ?? null,
           supportsInbound: payload.supportsInbound,
           supportsOutbound: payload.supportsOutbound,
         })
@@ -266,6 +317,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
                 slug: toSlug(payload.name),
               }
             : {}),
+          ...(payload.logoUrl !== undefined ? { logoUrl: payload.logoUrl } : {}),
           ...(payload.supportsInbound !== undefined
             ? { supportsInbound: payload.supportsInbound }
             : {}),

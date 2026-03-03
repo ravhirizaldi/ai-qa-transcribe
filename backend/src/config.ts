@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
@@ -24,4 +24,12 @@ for (const envPath of envCandidates) {
   }
 }
 
-export const env = EnvSchema.parse(process.env);
+const parsedEnv = EnvSchema.parse(process.env);
+
+export const env: Env = {
+  ...parsedEnv,
+  // Keep uploads location stable regardless of process cwd.
+  UPLOAD_DIR: isAbsolute(parsedEnv.UPLOAD_DIR)
+    ? parsedEnv.UPLOAD_DIR
+    : resolve(moduleDir, "..", parsedEnv.UPLOAD_DIR),
+};

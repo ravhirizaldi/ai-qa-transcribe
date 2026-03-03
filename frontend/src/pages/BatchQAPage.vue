@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
+import { Image as ImageIcon } from "lucide-vue-next";
 import AudioUploader from "../components/AudioUploader.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
 import TranscriptViewer from "../components/TranscriptViewer.vue";
@@ -40,6 +41,7 @@ const selectedJobId = ref("");
 const selectedJobDetail = ref<any | null>(null);
 const loadingJobDetail = ref(false);
 const selectedJobAudioUrl = ref<string | null>(null);
+const resultTranscriptRef = ref<{ seekTo: (seconds: number) => void } | null>(null);
 
 const jobsWithAnalysis = ref<Record<string, any>>({});
 const activeMatrixRows = ref<any[]>([]);
@@ -61,6 +63,11 @@ const hasMatrixForProject = ref(true);
 const matrixMessage = ref("");
 const requestingAnalyze = ref(false);
 const lockedBatchId = ref("");
+const showConfirmModal = ref(false);
+const confirmTitle = ref("");
+const confirmMessage = ref("");
+const confirmBusy = ref(false);
+let confirmAction: null | (() => Promise<void>) = null;
 
 let ws: WebSocket | null = null;
 let pollTimer: number | null = null;
@@ -68,6 +75,60 @@ let realtimeBatchId = "";
 
 const batchNamesById = ref<Record<string, string>>({});
 const BATCH_NAME_KEY = "qa_batch_names_v1";
+const apiBaseUrl = (
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:3001"
+).replace(/\/$/, "");
+const logoBgColors = ref<Record<string, string>>({});
+
+const resolveTenantLogoUrl = (logoUrl?: string | null) => {
+  if (!logoUrl) return "";
+  if (logoUrl.startsWith("http://") || logoUrl.startsWith("https://")) {
+    return logoUrl;
+  }
+  return `${apiBaseUrl}${logoUrl.startsWith("/") ? logoUrl : `/${logoUrl}`}`;
+};
+
+const getLogoBgStyle = (src: string) => ({
+  backgroundColor: logoBgColors.value[src] || "rgba(2, 6, 23, 0.65)",
+});
+
+const applyDominantLogoColor = (event: Event) => {
+  const img = event.target as HTMLImageElement;
+  const src = img.currentSrc || img.src;
+  if (!src || logoBgColors.value[src]) return;
+
+  try {
+    const canvas = document.createElement("canvas");
+    const size = 24;
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(img, 0, 0, size, size);
+    const { data } = ctx.getImageData(0, 0, size, size);
+
+    let rSum = 0;
+    let gSum = 0;
+    let bSum = 0;
+    let count = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha < 40) continue;
+      rSum += data[i];
+      gSum += data[i + 1];
+      bSum += data[i + 2];
+      count += 1;
+    }
+    if (!count) return;
+
+    const r = Math.round(rSum / count);
+    const g = Math.round(gSum / count);
+    const b = Math.round(bSum / count);
+    logoBgColors.value[src] = `rgba(${r}, ${g}, ${b}, 0.3)`;
+  } catch {
+    // Ignore extraction errors (for example, tainted canvas).
+  }
+};
 
 const selectedTenant = computed(
   () =>
@@ -83,9 +144,23 @@ const selectedBatchJobs = computed(
   () =>
     (batchDetails.value?.jobs || []) as Array<{
       id: string;
+      fileName: string;
       status: string;
       progress: number;
+      errorMessage?: string | null;
     }>,
+);
+const jobsPageSize = 8;
+const jobsCurrentPage = ref(1);
+const jobsTotalPages = computed(() =>
+  Math.max(1, Math.ceil(selectedBatchJobs.value.length / jobsPageSize)),
+);
+const pagedBatchJobs = computed(() => {
+  const start = (jobsCurrentPage.value - 1) * jobsPageSize;
+  return selectedBatchJobs.value.slice(start, start + jobsPageSize);
+});
+const jobsPageNumbers = computed(() =>
+  Array.from({ length: jobsTotalPages.value }, (_, i) => i + 1),
 );
 const selectedJobMeta = computed(
   () =>
@@ -268,8 +343,9 @@ const getBatchName = (batch: BatchHistoryItem) => {
 
 const canDeleteBatch = (batch: BatchHistoryItem) => {
   return (
-    (batch.totalJobs === 0 && batch.status === "queued") ||
-    (batch.totalJobs > 0 && batch.failedJobs === batch.totalJobs)
+    batch.totalJobs === 0 ||
+    (batch.totalJobs > 0 &&
+      batch.completedJobs + batch.failedJobs === batch.totalJobs)
   );
 };
 
@@ -630,6 +706,39 @@ const closeResultModal = () => {
   showResultModal.value = false;
 };
 
+const openConfirm = (
+  title: string,
+  message: string,
+  action: () => Promise<void>,
+) => {
+  confirmTitle.value = title;
+  confirmMessage.value = message;
+  confirmAction = action;
+  showConfirmModal.value = true;
+};
+
+const closeConfirmModal = () => {
+  if (confirmBusy.value) return;
+  showConfirmModal.value = false;
+  confirmAction = null;
+};
+
+const runConfirmAction = async () => {
+  if (!confirmAction) return;
+  confirmBusy.value = true;
+  try {
+    await confirmAction();
+    showConfirmModal.value = false;
+    confirmAction = null;
+  } finally {
+    confirmBusy.value = false;
+  }
+};
+
+const seekFromScorecardEvidence = (seconds: number) => {
+  resultTranscriptRef.value?.seekTo(seconds);
+};
+
 const loadSelectedJobAudio = async () => {
   if (!selectedJobId.value) return;
   try {
@@ -694,7 +803,7 @@ const startAnalyzeQueued = async () => {
 };
 
 const canDeleteJob = (job: { status: string }) => {
-  return job.status === "queued" || job.status === "uploading";
+  return job.status === "completed" || job.status === "failed";
 };
 
 const canRetryJob = (job: { status: string }) => {
@@ -703,20 +812,25 @@ const canRetryJob = (job: { status: string }) => {
 
 const deleteJobAction = async (job: { id: string; status: string }) => {
   if (!canDeleteJob(job)) {
-    toast.error("Only unprocessed recordings can be deleted.");
+    toast.error("Recording can be deleted only after processing is completed.");
     return;
   }
-
-  try {
-    await deleteJob(job.id);
-    toast.success("Recording deleted");
-    await loadHistory();
-    await loadSelectedBatchDetail();
-  } catch (error) {
-    toast.error(
-      error instanceof Error ? error.message : "Failed to delete recording",
-    );
-  }
+  openConfirm(
+    "Delete Recording",
+    "Delete this QA recording and all related analysis data? This action cannot be undone.",
+    async () => {
+      try {
+        await deleteJob(job.id);
+        toast.success("Recording deleted");
+        await loadHistory();
+        await loadSelectedBatchDetail();
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to delete recording",
+        );
+      }
+    },
+  );
 };
 
 const retryJobAction = async (job: { id: string; status: string }) => {
@@ -743,27 +857,33 @@ const retryJobAction = async (job: { id: string; status: string }) => {
 
 const deleteBatchAction = async (batch: BatchHistoryItem) => {
   if (!canDeleteBatch(batch)) {
-    toast.error("Only empty queued batch can be deleted.");
+    toast.error("Batch can be deleted only when all recordings are processed.");
     return;
   }
+  openConfirm(
+    "Delete Batch",
+    "Delete this QA batch and all recordings/results inside it? This action cannot be undone.",
+    async () => {
+      try {
+        await deleteBatch(batch.id);
+        toast.success("Batch deleted");
 
-  try {
-    await deleteBatch(batch.id);
-    toast.success("Batch deleted");
-
-    if (selectedBatchId.value === batch.id) {
-      selectedBatchId.value = "";
-      batchDetails.value = null;
-    }
-    await loadHistory();
-  } catch (error) {
-    toast.error(
-      error instanceof Error ? error.message : "Failed to delete batch",
-    );
-  }
+        if (selectedBatchId.value === batch.id) {
+          selectedBatchId.value = "";
+          batchDetails.value = null;
+        }
+        await loadHistory();
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to delete batch",
+        );
+      }
+    },
+  );
 };
 
 watch(selectedBatchId, async () => {
+  jobsCurrentPage.value = 1;
   showResultModal.value = false;
   selectedJobAudioUrl.value = null;
   await loadSelectedBatchDetail();
@@ -771,12 +891,27 @@ watch(selectedBatchId, async () => {
 });
 
 watch(selectedJobId, async () => {
+  const selectedIndex = selectedBatchJobs.value.findIndex(
+    (job) => job.id === selectedJobId.value,
+  );
+  if (selectedIndex >= 0) {
+    jobsCurrentPage.value = Math.floor(selectedIndex / jobsPageSize) + 1;
+  }
   selectedJobAudioUrl.value = null;
   await loadSelectedJobDetail();
   if (showResultModal.value) {
     await loadSelectedJobAudio();
   }
 });
+
+watch(
+  () => selectedBatchJobs.value.length,
+  () => {
+    if (jobsCurrentPage.value > jobsTotalPages.value) {
+      jobsCurrentPage.value = jobsTotalPages.value;
+    }
+  },
+);
 
 // When the user clicks the "QA Calculation" nav link while already inside a workspace,
 // the URL drops to /batch (no query params). Detect this and reset the view.
@@ -853,8 +988,29 @@ onUnmounted(() => {
           class="tenant-card"
           @click="openTenantWorkspace(tenant.id)"
         >
-          <p class="tenant-name">{{ tenant.name }}</p>
-          <p class="tenant-meta">Open QA Workspace</p>
+          <div class="tenant-card-main">
+            <div
+              class="tenant-logo"
+              :style="
+                tenant.logoUrl
+                  ? getLogoBgStyle(resolveTenantLogoUrl(tenant.logoUrl))
+                  : undefined
+              "
+            >
+              <img
+                v-if="tenant.logoUrl"
+                :src="resolveTenantLogoUrl(tenant.logoUrl)"
+                :alt="`${tenant.name} logo`"
+                crossorigin="anonymous"
+                @load="applyDominantLogoColor"
+              />
+              <ImageIcon v-else class="w-4 h-4" />
+            </div>
+            <div>
+              <p class="tenant-name">{{ tenant.name }}</p>
+              <p class="tenant-meta">Open QA Workspace</p>
+            </div>
+          </div>
         </button>
       </div>
     </div>
@@ -867,18 +1023,18 @@ onUnmounted(() => {
               {{ selectedTenant?.name || "Tenant Workspace" }}
             </p>
             <p class="workspace-subtitle">
-              Project QA batches and upload queue
+              Build batches, drop recordings, and track QA performance live
             </p>
           </div>
           <button class="btn-ghost" @click="closeWorkspace">
-            Back To QA Home
+            Exit Workspace
           </button>
         </div>
 
         <div class="workspace-body">
           <aside class="project-panel">
             <div class="project-panel-head">
-              <p>Projects</p>
+              <p>Choose Project</p>
             </div>
             <div v-if="!projects.length" class="msg-muted">
               No projects in this tenant.
@@ -916,9 +1072,9 @@ onUnmounted(() => {
               <div class="qa-layout">
                 <div class="history-panel panel-card">
                   <div class="history-head">
-                    <p class="panel-title">QA History</p>
+                    <p class="panel-title">Batch Timeline</p>
                     <button class="btn-primary" @click="openCreateBatchModal">
-                      + Create Batch
+                      + New Batch
                     </button>
                   </div>
                   <p v-if="loadingHistory" class="msg-muted">
@@ -954,13 +1110,13 @@ onUnmounted(() => {
                       </button>
                     </div>
                     <p v-if="!history.length" class="msg-muted">
-                      No QA history for this project yet.
+                      No batches yet. Create your first batch to get started.
                     </p>
                   </div>
                 </div>
 
                 <div class="work-panel panel-card">
-                  <p class="panel-title">QA Result</p>
+                  <p class="panel-title">Live QA Dashboard</p>
                   <div class="dashboard-grid">
                     <div class="dashboard-item">
                       <span>Total</span>
@@ -1020,7 +1176,7 @@ onUnmounted(() => {
 
                   <div class="upload-box">
                     <div class="upload-head">
-                      <p>Upload Recordings</p>
+                      <p>Add Recordings</p>
                       <div class="upload-action-row">
                         <button
                           class="btn-ghost"
@@ -1035,16 +1191,16 @@ onUnmounted(() => {
                           @click="startAnalyzeQueued"
                           :title="
                             !hasQueuedJobs
-                              ? 'No queued files to analyze'
-                              : 'Start analysis on queued files'
+                              ? 'No queued recordings ready'
+                              : 'Run QA on queued recordings'
                           "
                         >
-                          Analyze
+                          Run QA
                         </button>
                       </div>
                     </div>
                     <p v-if="!selectedBatchId" class="msg-muted">
-                      Create/select a batch first.
+                      Create or select a batch first.
                     </p>
                     <div v-else>
                       <AudioUploader
@@ -1058,13 +1214,13 @@ onUnmounted(() => {
                   </div>
 
                   <div class="jobs-box">
-                    <p class="jobs-title">Selected Batch Jobs</p>
+                    <p class="jobs-title">Recording Queue & Results</p>
                     <div v-if="!batchDetails?.jobs?.length" class="msg-muted">
                       No recordings in this batch yet.
                     </div>
                     <div v-else class="jobs-list">
                       <div
-                        v-for="job in batchDetails.jobs"
+                        v-for="job in pagedBatchJobs"
                         :key="job.id"
                         class="job-row"
                         :class="{ 'job-row-active': selectedJobId === job.id }"
@@ -1108,6 +1264,31 @@ onUnmounted(() => {
                           </button>
                         </div>
                       </div>
+                    </div>
+                    <div v-if="batchDetails?.jobs?.length" class="jobs-pagination">
+                      <button
+                        class="btn-ghost"
+                        :disabled="jobsCurrentPage <= 1"
+                        @click="jobsCurrentPage -= 1"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        v-for="page in jobsPageNumbers"
+                        :key="page"
+                        class="jobs-page-btn"
+                        :class="{ 'jobs-page-btn-active': page === jobsCurrentPage }"
+                        @click="jobsCurrentPage = page"
+                      >
+                        {{ page }}
+                      </button>
+                      <button
+                        class="btn-ghost"
+                        :disabled="jobsCurrentPage >= jobsTotalPages"
+                        @click="jobsCurrentPage += 1"
+                      >
+                        Next
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1179,26 +1360,26 @@ onUnmounted(() => {
                         class="result-layout"
                       >
                         <div class="result-panel">
-                          <div class="result-panel-header">
-                            <p class="result-title">Transcript</p>
-                          </div>
                           <div class="result-panel-content-fixed">
                             <TranscriptViewer
+                              ref="resultTranscriptRef"
                               :transcript="selectedJobDetail.transcript || ''"
                               :segments="transcriptSegments"
                               :file="null"
                               :audio-url="selectedJobAudioUrl"
+                              :show-resize="false"
                             />
                           </div>
                         </div>
                         <div class="result-panel">
-                          <div class="result-panel-header">
-                            <p class="result-title">QA Scorecard</p>
-                          </div>
                           <div class="result-panel-content-scroll">
                             <AnalysisPanel
                               v-if="selectedJobDetail.analysis"
                               :analysis="selectedJobDetail.analysis"
+                              :show-resize="false"
+                              :show-heading="false"
+                              :flat="true"
+                              @seek-to="seekFromScorecardEvidence"
                             />
                             <p v-else class="msg-muted">
                               No analysis output found.
@@ -1210,6 +1391,35 @@ onUnmounted(() => {
                         Result not ready. Current status:
                         {{ selectedJobMeta?.status || "unknown" }}.
                       </div>
+                    </div>
+                  </div>
+                </div>
+              </Teleport>
+
+              <Teleport to="body">
+                <div
+                  v-if="showConfirmModal"
+                  class="confirm-modal-backdrop"
+                  @click.self="closeConfirmModal"
+                >
+                  <div class="confirm-modal popup-in">
+                    <h3 class="confirm-modal-title">{{ confirmTitle }}</h3>
+                    <p class="confirm-modal-message">{{ confirmMessage }}</p>
+                    <div class="confirm-modal-actions">
+                      <button
+                        class="btn-ghost"
+                        :disabled="confirmBusy"
+                        @click="closeConfirmModal"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        class="btn-danger"
+                        :disabled="confirmBusy"
+                        @click="runConfirmAction"
+                      >
+                        {{ confirmBusy ? "Deleting..." : "Delete" }}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1281,6 +1491,33 @@ onUnmounted(() => {
   background: rgba(15, 23, 42, 0.82);
   transform: translateY(-2px);
   box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
+}
+
+.tenant-card-main {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.tenant-logo {
+  width: 2.25rem;
+  aspect-ratio: 1 / 1;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  background: rgba(2, 6, 23, 0.65);
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.tenant-logo img {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+  object-position: center center;
 }
 
 .tenant-name {
@@ -1557,6 +1794,35 @@ onUnmounted(() => {
   gap: 0.4rem;
 }
 
+.jobs-pagination {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.jobs-page-btn {
+  border-radius: 0.55rem;
+  border: 1px solid rgba(100, 116, 139, 0.4);
+  background: rgba(15, 23, 42, 0.45);
+  color: #e2e8f0;
+  padding: 0.28rem 0.58rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.jobs-page-btn-active {
+  color: #082f49;
+  border-color: transparent;
+  background: linear-gradient(
+    180deg,
+    rgba(34, 211, 238, 0.95),
+    rgba(8, 145, 178, 0.95)
+  );
+}
+
 .job-row {
   border-radius: 0.58rem;
   border: 1px solid rgba(100, 116, 139, 0.4);
@@ -1781,6 +2047,44 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
+}
+
+.confirm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483001;
+  background: rgba(2, 6, 23, 0.72);
+  display: grid;
+  place-items: center;
+  padding: 0.7rem;
+}
+
+.confirm-modal {
+  width: min(460px, calc(100vw - 1.4rem));
+  border-radius: 0.9rem;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  background: rgba(15, 23, 42, 0.98);
+  padding: 0.85rem;
+}
+
+.confirm-modal-title {
+  color: #f8fafc;
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.confirm-modal-message {
+  margin-top: 0.35rem;
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.confirm-modal-actions {
+  margin-top: 0.75rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
 }
 
 .result-modal-backdrop {

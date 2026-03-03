@@ -88,6 +88,7 @@ const scopeError = ref("");
 const selectedItem = computed(
   () => items.value.find((item) => item.id === selectedItemId.value) ?? null,
 );
+const workspaceTranscriptRef = ref<{ seekTo: (seconds: number) => void } | null>(null);
 const selectedProject = computed(
   () => projects.value.find((project) => project.id === projectId.value) ?? null,
 );
@@ -218,6 +219,10 @@ watch(
 
 const toggleMaximize = (panel: "transcript" | "analysis") => {
   maximizedPanel.value = maximizedPanel.value === panel ? null : panel;
+};
+
+const seekFromScorecardEvidence = (seconds: number) => {
+  workspaceTranscriptRef.value?.seekTo(seconds);
 };
 
 const getDefectStats = (scorecard: QAScorecard) => {
@@ -616,6 +621,7 @@ onUnmounted(() => {
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
           <div class="flex flex-col h-full min-h-0 transition-all duration-300 ease-in-out" :class="{ hidden: maximizedPanel === 'analysis', 'col-span-1 lg:col-span-2': maximizedPanel === 'transcript' }">
             <TranscriptViewer
+              ref="workspaceTranscriptRef"
               :transcript="selectedItem.transcript"
               :segments="selectedItem.segments"
               :file="selectedItem.file"
@@ -628,6 +634,7 @@ onUnmounted(() => {
               :analysis="selectedItem.analysis"
               :is-maximized="maximizedPanel === 'analysis'"
               @toggle-maximize="toggleMaximize('analysis')"
+              @seek-to="seekFromScorecardEvidence"
             />
           </div>
         </div>

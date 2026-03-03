@@ -28,10 +28,14 @@ interface QAScorecard {
 const props = defineProps<{
   analysis: QAScorecard;
   isMaximized?: boolean;
+  showResize?: boolean;
+  showHeading?: boolean;
+  flat?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "toggle-maximize"): void;
+  (e: "seek-to", seconds: number): void;
 }>();
 
 const hasRisk = computed(() => Boolean(props.analysis.red_flags));
@@ -100,12 +104,57 @@ const prettyTimestamp = (raw: string): string => {
   if (Number.isFinite(single)) return secToClock(single);
   return value;
 };
+
+const clockToSec = (value: string): number | null => {
+  const parts = value.split(":").map((part) => Number(part.trim()));
+  if (!parts.every((num) => Number.isFinite(num))) return null;
+  if (parts.length === 2) {
+    const mm = parts[0] ?? 0;
+    const ss = parts[1] ?? 0;
+    return mm * 60 + ss;
+  }
+  if (parts.length === 3) {
+    const hh = parts[0] ?? 0;
+    const mm = parts[1] ?? 0;
+    const ss = parts[2] ?? 0;
+    return hh * 3600 + mm * 60 + ss;
+  }
+  return null;
+};
+
+const evidenceStartSeconds = (raw: string): number | null => {
+  const value = (raw || "").trim();
+  if (!value || value.toUpperCase() === "N/A") return null;
+
+  const firstRangePart = value.split("-")[0]?.trim() || value;
+  if (/^\d{2}:\d{2}(?::\d{2})?$/.test(firstRangePart)) {
+    return clockToSec(firstRangePart);
+  }
+
+  const numbers = value.match(/-?\d+(?:\.\d+)?/g);
+  if (!numbers || numbers.length === 0) return null;
+  const first = Number(numbers[0]);
+  if (!Number.isFinite(first)) return null;
+  return Math.max(0, first);
+};
+
+const onEvidenceClick = (raw: string) => {
+  const seconds = evidenceStartSeconds(raw);
+  if (seconds === null) return;
+  emit("seek-to", seconds);
+};
 </script>
 
 <template>
-  <div class="analysis-panel h-full overflow-y-auto p-5 sm:p-6 relative">
+  <div
+    :class="[
+      'analysis-panel h-full overflow-y-auto relative',
+      flat ? 'analysis-panel-flat p-0 sm:p-0' : 'p-5 sm:p-6',
+    ]"
+  >
     <!-- Resize Button positioned absolutely at top right -->
     <button
+      v-if="showResize !== false"
       @click="emit('toggle-maximize')"
       class="absolute top-5 right-5 p-2 rounded-lg hover:bg-slate-700/50 text-slate-400 hover:text-cyan-300 transition-colors z-10"
       :title="isMaximized ? 'Minimize' : 'Maximize'"
@@ -114,8 +163,8 @@ const prettyTimestamp = (raw: string): string => {
       <Maximize2 v-else class="w-5 h-5" />
     </button>
 
-    <div class="flex flex-col gap-5 mb-5">
-      <div class="pr-10">
+    <div class="score-overview-card flex flex-col gap-5 mb-5">
+      <div v-if="showHeading !== false" class="pr-10">
         <!-- Padding right to avoid overlap with resize button -->
         <p class="text-xs uppercase tracking-[0.22em] text-cyan-100/70">
           Quality Review
@@ -296,7 +345,16 @@ const prettyTimestamp = (raw: string): string => {
               <td
                 class="px-3 py-2.5 font-mono text-cyan-300 whitespace-nowrap w-1/6"
               >
-                {{ prettyTimestamp(row.evidence_timestamp) }}
+                <button
+                  v-if="evidenceStartSeconds(row.evidence_timestamp) !== null"
+                  class="evidence-link"
+                  @click.stop="onEvidenceClick(row.evidence_timestamp)"
+                >
+                  {{ prettyTimestamp(row.evidence_timestamp) }}
+                </button>
+                <span v-else class="text-slate-500">
+                  {{ prettyTimestamp(row.evidence_timestamp) }}
+                </span>
               </td>
               <td class="px-3 py-2.5 text-slate-300">{{ row.note }}</td>
             </tr>
@@ -316,6 +374,12 @@ const prettyTimestamp = (raw: string): string => {
     rgba(15, 23, 42, 0.86),
     rgba(2, 6, 23, 0.95)
   );
+}
+
+.analysis-panel-flat {
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
 .status-pill {
@@ -340,6 +404,13 @@ const prettyTimestamp = (raw: string): string => {
   border: 1px solid rgba(52, 211, 153, 0.42);
   background: rgba(52, 211, 153, 0.16);
   color: #bbf7d0;
+}
+
+.score-overview-card {
+  border-radius: 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.5);
+  padding: 1.15rem 0.95rem 0.95rem;
 }
 
 .info-card {
@@ -377,5 +448,16 @@ const prettyTimestamp = (raw: string): string => {
   border-radius: 0.8rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
   overflow-x: auto;
+}
+
+.evidence-link {
+  color: #67e8f9;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.evidence-link:hover {
+  color: #a5f3fc;
 }
 </style>

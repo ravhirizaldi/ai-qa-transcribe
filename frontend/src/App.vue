@@ -10,6 +10,7 @@ const session = useSession();
 
 const isAuthenticated = computed(() => Boolean(session.token.value));
 const isLoginPage = computed(() => route.path === "/login");
+const isSettingsRoute = computed(() => route.path.startsWith("/settings"));
 
 const showLogoutConfirm = ref(false);
 
@@ -71,9 +72,8 @@ const confirmLogoutAction = async () => {
                 <span>Tenants</span>
               </RouterLink>
               <RouterLink
-                to="/settings"
-                class="page-link"
-                active-class="page-link-active"
+                to="/settings/users"
+                :class="['page-link', { 'page-link-active': isSettingsRoute }]"
               >
                 <Settings class="w-4 h-4" />
                 <span>Settings</span>

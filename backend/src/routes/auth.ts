@@ -11,7 +11,24 @@ const RegisterSchema = z.object({
 });
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
+  const canRegister = async () => {
+    const existingUser = await db.query.users.findFirst({
+      columns: { id: true },
+    });
+    return !existingUser;
+  };
+
+  app.get("/auth/bootstrap-status", async () => {
+    return { canRegister: await canRegister() };
+  });
+
   app.post("/auth/register", async (request, reply) => {
+    if (!(await canRegister())) {
+      return reply
+        .code(403)
+        .send({ message: "Registration is disabled after initial setup" });
+    }
+
     const payload = RegisterSchema.parse(request.body);
     const existing = await db.query.users.findFirst({
       where: eq(users.email, payload.email),

@@ -16,6 +16,7 @@ export const ProjectSchema = z.object({
   tenantId: z.string().uuid(),
   name: z.string(),
   slug: z.string(),
+  logoUrl: z.string().nullable(),
   supportsInbound: z.boolean(),
   supportsOutbound: z.boolean(),
   createdAt: z.string(),

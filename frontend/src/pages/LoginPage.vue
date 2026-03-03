@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { toast } from "vue-sonner";
-import { login, register } from "../services/backendApi";
+import { getAuthBootstrapStatus, login, register } from "../services/backendApi";
 import { useSession } from "../services/session";
 
 const router = useRouter();
@@ -11,6 +11,7 @@ const { setToken } = useSession();
 const email = ref("");
 const password = ref("");
 const mode = ref<"login" | "register">("login");
+const canRegister = ref(false);
 const isSubmitting = ref(false);
 const blockAutofill = ref(true);
 
@@ -18,6 +19,9 @@ const getAuthErrorMessage = (error: unknown) => {
   const msg = error instanceof Error ? error.message : "Authentication failed";
   if (msg.includes("401")) return "Invalid email or password.";
   if (msg.includes("409")) return "Email already registered.";
+  if (msg.includes("Registration is disabled")) {
+    return "Registration is disabled. Please login with an existing account.";
+  }
   if (msg.includes("Failed to fetch")) return "Cannot reach backend server.";
   return msg;
 };
@@ -44,6 +48,19 @@ const submit = async () => {
 const unlockInputs = () => {
   if (blockAutofill.value) blockAutofill.value = false;
 };
+
+onMounted(async () => {
+  try {
+    const status = await getAuthBootstrapStatus();
+    canRegister.value = status.canRegister;
+    if (!status.canRegister) {
+      mode.value = "login";
+    }
+  } catch {
+    canRegister.value = false;
+    mode.value = "login";
+  }
+});
 </script>
 
 <template>
@@ -61,7 +78,7 @@ const unlockInputs = () => {
         {{
           mode === "login"
             ? "Login to continue to Nexto VoiceGuard."
-            : "Register and start managing tenants and matrices."
+            : "Register the first account to start managing tenants and matrices."
         }}
       </p>
 
@@ -122,6 +139,7 @@ const unlockInputs = () => {
         </button>
 
         <button
+          v-if="canRegister"
           type="button"
           @click="mode = mode === 'login' ? 'register' : 'login'"
           class="w-full text-xs text-slate-300 hover:text-cyan-200"

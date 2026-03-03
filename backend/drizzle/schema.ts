@@ -39,6 +39,29 @@ export const users = pgTable("users", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+export const accessRoles = pgTable("access_roles", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull().unique(),
+  description: text("description"),
+  permissionsJson: jsonb("permissions_json").$type<unknown[]>().notNull().default([]),
+  createdBy: uuid("created_by").references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const userRoleAssignments = pgTable(
+  "user_role_assignments",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id").notNull().references(() => users.id),
+    roleId: uuid("role_id").notNull().references(() => accessRoles.id),
+    scopeJson: jsonb("scope_json").$type<unknown>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [unique().on(t.userId, t.roleId)],
+);
+
 export const tenants = pgTable("tenants", {
   id: uuid("id").defaultRandom().primaryKey(),
   name: text("name").notNull(),
@@ -68,6 +91,7 @@ export const projects = pgTable(
     tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
     name: text("name").notNull(),
     slug: text("slug").notNull(),
+    logoUrl: text("logo_url"),
     supportsInbound: boolean("supports_inbound").default(true).notNull(),
     supportsOutbound: boolean("supports_outbound").default(false).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

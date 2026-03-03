@@ -59,6 +59,11 @@ export const login = async (email: string, password: string) => {
   );
 };
 
+export const getAuthBootstrapStatus = async () => {
+  const response = await fetch(`${API_BASE}/auth/bootstrap-status`);
+  return parse<{ canRegister: boolean }>(response);
+};
+
 export type Tenant = {
   id: string;
   name: string;
@@ -70,6 +75,7 @@ export type Project = {
   tenantId: string;
   name: string;
   slug: string;
+  logoUrl?: string | null;
   supportsInbound: boolean;
   supportsOutbound: boolean;
 };
@@ -110,6 +116,67 @@ export type MatrixVersion = {
 
 export type MatrixVersionDetail = MatrixVersion & {
   rows: MatrixRow[];
+};
+
+export const AVAILABLE_PERMISSION_KEYS = [
+  "tenants:view",
+  "tenants:manage",
+  "projects:view",
+  "projects:manage",
+  "matrices:view",
+  "matrices:manage",
+  "jobs:view",
+  "jobs:manage",
+  "settings:view",
+  "settings:manage",
+  "users:manage",
+  "roles:manage",
+  "system:manage",
+] as const;
+
+export type PermissionKey = (typeof AVAILABLE_PERMISSION_KEYS)[number];
+
+export type RoleScope = {
+  includeAllTenants: boolean;
+  includeAllProjects: boolean;
+  tenantIds: string[];
+  projectIds: string[];
+};
+
+export type AccessRole = {
+  id: string;
+  name: string;
+  description?: string | null;
+  permissions: PermissionKey[];
+  createdBy?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  assignmentCount: number;
+};
+
+export type UserRoleAssignment = {
+  id: string;
+  roleId: string;
+  roleName: string;
+  permissions: PermissionKey[];
+  scope: RoleScope;
+};
+
+export type SettingsUser = {
+  id: string;
+  email: string;
+  isRestricted: boolean;
+  createdAt: string;
+  updatedAt: string;
+  assignments: UserRoleAssignment[];
+};
+
+export type SettingsUserProfile = {
+  id: string;
+  email: string;
+  isRestricted: boolean;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export const listTenants = async () => {
@@ -160,6 +227,7 @@ export const createProject = async (
   tenantId: string,
   payload: {
     name: string;
+    logoUrl?: string | null;
     supportsInbound: boolean;
     supportsOutbound: boolean;
   },
@@ -177,6 +245,7 @@ export const updateProject = async (
   projectId: string,
   payload: {
     name?: string;
+    logoUrl?: string | null;
     supportsInbound?: boolean;
     supportsOutbound?: boolean;
   },
@@ -191,6 +260,21 @@ export const updateProject = async (
   );
   return parse<Project>(response);
 };
+
+export const uploadImage = async (file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(`${API_BASE}/uploads/images`, {
+    method: "POST",
+    headers: withAuth(),
+    body: form,
+  });
+
+  return parse<{ path: string }>(response);
+};
+
+export const uploadProjectLogo = async (file: File) => uploadImage(file);
 
 export const deleteProject = async (tenantId: string, projectId: string) => {
   const response = await fetch(
@@ -307,7 +391,7 @@ export const deleteMatrixVersion = async (
 };
 
 export const getGlobalSettings = async () => {
-  const response = await fetch(`${API_BASE}/settings/global`, {
+  const response = await fetch(`${API_BASE}/settings/system`, {
     headers: withAuth(),
   });
   return parse<{
@@ -322,7 +406,7 @@ export const updateGlobalSettings = async (payload: {
   xaiApiKey?: string;
   xaiModel?: string;
 }) => {
-  const response = await fetch(`${API_BASE}/settings/global`, {
+  const response = await fetch(`${API_BASE}/settings/system`, {
     method: "PUT",
     headers: withAuth({ "Content-Type": "application/json" }),
     body: JSON.stringify(payload),
@@ -333,6 +417,120 @@ export const updateGlobalSettings = async (payload: {
     hasXaiApiKey: boolean;
     xaiModel: string;
   }>(response);
+};
+
+export const listAccessRoles = async () => {
+  const response = await fetch(`${API_BASE}/settings/roles`, {
+    headers: withAuth(),
+  });
+  return parse<AccessRole[]>(response);
+};
+
+export const createAccessRole = async (payload: {
+  name: string;
+  description?: string | null;
+  permissions: PermissionKey[];
+}) => {
+  const response = await fetch(`${API_BASE}/settings/roles`, {
+    method: "POST",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<AccessRole>(response);
+};
+
+export const updateAccessRole = async (
+  roleId: string,
+  payload: {
+    name?: string;
+    description?: string | null;
+    permissions?: PermissionKey[];
+  },
+) => {
+  const response = await fetch(`${API_BASE}/settings/roles/${roleId}`, {
+    method: "PATCH",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<AccessRole>(response);
+};
+
+export const deleteAccessRole = async (roleId: string) => {
+  const response = await fetch(`${API_BASE}/settings/roles/${roleId}`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
+export const listSettingsUsers = async () => {
+  const response = await fetch(`${API_BASE}/settings/users`, {
+    headers: withAuth(),
+  });
+  return parse<SettingsUser[]>(response);
+};
+
+export const updateSettingsUserAccess = async (
+  userId: string,
+  payload: {
+    isRestricted: boolean;
+    assignments: Array<{
+      roleId: string;
+      scope: Partial<RoleScope>;
+    }>;
+  },
+) => {
+  const response = await fetch(`${API_BASE}/settings/users/${userId}/access`, {
+    method: "PUT",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
+export const createSettingsUser = async (payload: {
+  email: string;
+  password: string;
+  isRestricted?: boolean;
+}) => {
+  const response = await fetch(`${API_BASE}/settings/users`, {
+    method: "POST",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<SettingsUser>(response);
+};
+
+export const updateSettingsUser = async (
+  userId: string,
+  payload: {
+    email?: string;
+    isRestricted?: boolean;
+  },
+) => {
+  const response = await fetch(`${API_BASE}/settings/users/${userId}`, {
+    method: "PATCH",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<SettingsUserProfile>(response);
+};
+
+export const changeSettingsUserPassword = async (userId: string, password: string) => {
+  const response = await fetch(`${API_BASE}/settings/users/${userId}/password`, {
+    method: "PUT",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ password }),
+  });
+  return parse<{ ok: boolean }>(response);
+};
+
+export const deleteSettingsUser = async (userId: string) => {
+  const response = await fetch(`${API_BASE}/settings/users/${userId}`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return parse<{ ok: boolean }>(response);
 };
 
 export const createBatch = async (payload: {

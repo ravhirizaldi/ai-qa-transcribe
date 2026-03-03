@@ -10,6 +10,7 @@ import { matrixRoutes } from "./routes/matrices.js";
 import { jobRoutes } from "./routes/jobs.js";
 import { healthRoutes } from "./routes/health.js";
 import { wsRoutes } from "./routes/ws.js";
+import { settingsRoutes } from "./routes/settings.js";
 import { broadcastEvent } from "./ws-hub.js";
 import { boss, QUEUES, startQueue } from "./queue.js";
 
@@ -20,7 +21,11 @@ declare module "fastify" {
 }
 
 export const buildApp = async () => {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    // Uploaded filenames can be long; allow matching long URL params safely.
+    maxParamLength: 5000,
+  });
 
   await app.register(cors, {
     origin: env.CORS_ORIGIN,
@@ -52,6 +57,7 @@ export const buildApp = async () => {
   await app.register(healthRoutes);
   await app.register(authRoutes);
   await app.register(tenantRoutes);
+  await app.register(settingsRoutes);
   await app.register(matrixRoutes);
   await app.register(jobRoutes);
   await app.register(wsRoutes);

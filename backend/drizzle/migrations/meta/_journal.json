@@ -36,6 +36,27 @@
       "when": 1772232000000,
       "tag": "0004_tenant_project_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1772445600000,
+      "tag": "0005_tenant_membership_role_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1772449200000,
+      "tag": "0006_dynamic_access_roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1772452800000,
+      "tag": "0007_project_logo_url",
+      "breakpoints": true
     }
   ]
 }
