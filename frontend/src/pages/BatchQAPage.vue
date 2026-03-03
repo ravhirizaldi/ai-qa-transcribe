@@ -176,7 +176,6 @@ const transcriptSegments = computed(() => {
     speakerId: seg.speakerId,
     role: seg.role,
     cleaned_text: seg.cleanedText,
-    sentiment: seg.sentiment,
     words: seg.wordsJson || [],
   }));
 });

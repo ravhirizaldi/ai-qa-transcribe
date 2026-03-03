@@ -279,7 +279,7 @@ const start = async () => {
           .set({
             role: cleaned.role,
             cleanedText: cleaned.cleaned_text,
-            sentiment: cleaned.sentiment,
+            sentiment: null,
           })
           .where(and(eq(jobSegments.jobId, jobId), eq(jobSegments.segmentIndex, idx)));
       }

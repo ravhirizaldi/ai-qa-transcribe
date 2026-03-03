@@ -325,20 +325,6 @@ defineExpose({
             </template>
           </p>
 
-          <div class="mt-2 flex items-center justify-end gap-2">
-            <span
-              v-if="seg.sentiment"
-              class="w-2 h-2 rounded-full"
-              :class="{
-                'bg-emerald-400': seg.sentiment === 'positive',
-                'bg-slate-400': seg.sentiment === 'neutral',
-                'bg-rose-400': seg.sentiment === 'negative',
-              }"
-            ></span>
-            <span class="text-[10px] uppercase tracking-[0.12em] opacity-65">
-              {{ seg.sentiment || "unlabeled" }}
-            </span>
-          </div>
         </div>
       </div>
     </div>

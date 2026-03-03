@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onUnmounted, ref, computed } from "vue";
-import { Mic, Sparkles, ShieldCheck, Activity } from "lucide-vue-next";
+import { Mic, Sparkles, ShieldCheck } from "lucide-vue-next";
 import { toast } from "vue-sonner";
 import AudioUploader from "../components/AudioUploader.vue";
 import TranscriptViewer from "../components/TranscriptViewer.vue";
@@ -72,7 +72,6 @@ const syncJob = async () => {
     speakerId: seg.speakerId,
     role: seg.role,
     cleaned_text: seg.cleanedText,
-    sentiment: seg.sentiment,
     words: seg.wordsJson,
   }));
   transcript.value =
@@ -191,7 +190,7 @@ onUnmounted(() => {
         </h2>
         <p class="mt-2 text-sm text-slate-300/90 max-w-2xl">
           Upload one support call and get a synced transcript, role-aware
-          cleanup, sentiment hints, and structured coaching notes.
+          cleanup, and structured coaching notes.
         </p>
       </div>
 
@@ -207,9 +206,6 @@ onUnmounted(() => {
           </div>
           <div class="pill">
             <ShieldCheck class="w-4 h-4" /><span>QA Matrix</span>
-          </div>
-          <div class="pill">
-            <Activity class="w-4 h-4" /><span>Sentiment Cues</span>
           </div>
         </div>
       </div>
