@@ -36,6 +36,20 @@ const router = useRouter();
 const tenants = ref<Tenant[]>([]);
 const projects = ref<Project[]>([]);
 const history = ref<BatchHistoryItem[]>([]);
+const tenantPreviewStats = ref<
+  Record<
+    string,
+    {
+      projects: number;
+      batches: number;
+      recordings: number;
+      completed: number;
+      failed: number;
+      inProgress: number;
+    }
+  >
+>({});
+const loadingTenantPreviewStats = ref(false);
 const batchDetails = ref<any | null>(null);
 const selectedJobId = ref("");
 const selectedJobDetail = ref<any | null>(null);
@@ -369,7 +383,9 @@ const syncRoute = async () => {
 const loadTenants = async () => {
   loading.value = true;
   try {
-    tenants.value = await listTenants();
+    const loaded = await listTenants();
+    tenants.value = loaded;
+    void loadTenantPreviewStats(loaded);
   } catch (error) {
     toast.error(
       error instanceof Error ? error.message : "Failed to load tenants",
@@ -734,6 +750,72 @@ const runConfirmAction = async () => {
   }
 };
 
+const loadTenantPreviewStats = async (targetTenants: Tenant[]) => {
+  loadingTenantPreviewStats.value = true;
+  try {
+    const pairs = await Promise.all(
+      targetTenants.map(async (tenant) => {
+        let tenantProjects: Project[] = [];
+        try {
+          tenantProjects = await listProjects(tenant.id);
+        } catch {
+          return [
+            tenant.id,
+            {
+              projects: 0,
+              batches: 0,
+              recordings: 0,
+              completed: 0,
+              failed: 0,
+              inProgress: 0,
+            },
+          ] as const;
+        }
+
+        const batchLists = await Promise.all(
+          tenantProjects.map(async (project) => {
+            try {
+              return await listProjectBatches(project.id);
+            } catch {
+              return [] as BatchHistoryItem[];
+            }
+          }),
+        );
+
+        const allBatches = batchLists.flat();
+        const recordings = allBatches.reduce(
+          (sum, batch) => sum + Number(batch.totalJobs || 0),
+          0,
+        );
+        const completed = allBatches.reduce(
+          (sum, batch) => sum + Number(batch.completedJobs || 0),
+          0,
+        );
+        const failed = allBatches.reduce(
+          (sum, batch) => sum + Number(batch.failedJobs || 0),
+          0,
+        );
+
+        return [
+          tenant.id,
+          {
+            projects: tenantProjects.length,
+            batches: allBatches.length,
+            recordings,
+            completed,
+            failed,
+            inProgress: Math.max(0, recordings - completed - failed),
+          },
+        ] as const;
+      }),
+    );
+
+    tenantPreviewStats.value = Object.fromEntries(pairs);
+  } finally {
+    loadingTenantPreviewStats.value = false;
+  }
+};
+
 const seekFromScorecardEvidence = (seconds: number) => {
   resultTranscriptRef.value?.seekTo(seconds);
 };
@@ -1009,6 +1091,35 @@ onUnmounted(() => {
               <p class="tenant-name">{{ tenant.name }}</p>
               <p class="tenant-meta">Open QA Workspace</p>
             </div>
+          </div>
+          <div class="tenant-stats">
+            <template v-if="tenantPreviewStats[tenant.id]">
+              <span class="tenant-stat-chip"
+                >Projects {{ tenantPreviewStats[tenant.id].projects }}</span
+              >
+              <span class="tenant-stat-chip"
+                >Batches {{ tenantPreviewStats[tenant.id].batches }}</span
+              >
+              <span class="tenant-stat-chip"
+                >Samples {{ tenantPreviewStats[tenant.id].recordings }}</span
+              >
+              <span class="tenant-stat-chip"
+                >Done {{ tenantPreviewStats[tenant.id].completed }}</span
+              >
+              <span class="tenant-stat-chip"
+                >Failed {{ tenantPreviewStats[tenant.id].failed }}</span
+              >
+              <span class="tenant-stat-chip"
+                >In Progress {{ tenantPreviewStats[tenant.id].inProgress }}</span
+              >
+            </template>
+            <span
+              v-else
+              class="tenant-meta"
+              >{{
+                loadingTenantPreviewStats ? "Loading tenant metrics..." : "No metrics yet"
+              }}</span
+            >
           </div>
         </button>
       </div>
@@ -1528,6 +1639,23 @@ onUnmounted(() => {
   margin-top: 0.2rem;
   color: #94a3b8;
   font-size: 0.78rem;
+}
+
+.tenant-stats {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.tenant-stat-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  background: rgba(2, 6, 23, 0.48);
+  color: #cbd5e1;
+  font-size: 0.66rem;
+  padding: 0.14rem 0.45rem;
+  letter-spacing: 0.03em;
 }
 
 .workspace-modal {

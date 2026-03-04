@@ -14,10 +14,38 @@ const mode = ref<"login" | "register">("login");
 const canRegister = ref(false);
 const isSubmitting = ref(false);
 const blockAutofill = ref(true);
+const authError = ref("");
 
 const getAuthErrorMessage = (error: unknown) => {
   const msg = error instanceof Error ? error.message : "Authentication failed";
+  if (msg.trim().startsWith("[")) {
+    try {
+      const parsed = JSON.parse(msg) as Array<{
+        path?: unknown[];
+        message?: string;
+      }>;
+      if (Array.isArray(parsed) && parsed.length) {
+        const first = parsed[0];
+        const field = Array.isArray(first.path) ? String(first.path[0] || "") : "";
+        const detail = String(first.message || "").toLowerCase();
+        if (field === "password" && detail.includes("too small")) {
+          return "Password must be at least 8 characters.";
+        }
+        if (field === "email") {
+          return "Please enter a valid email address.";
+        }
+        if (first.message) {
+          return String(first.message);
+        }
+      }
+    } catch {
+      // fall back to existing mapping rules
+    }
+  }
   if (msg.includes("401")) return "Invalid email or password.";
+  if (msg.toLowerCase().includes("invalid credentials")) {
+    return "Invalid email or password.";
+  }
   if (msg.includes("409")) return "Email already registered.";
   if (msg.includes("Registration is disabled")) {
     return "Registration is disabled. Please login with an existing account.";
@@ -27,6 +55,7 @@ const getAuthErrorMessage = (error: unknown) => {
 };
 
 const submit = async () => {
+  authError.value = "";
   isSubmitting.value = true;
 
   try {
@@ -39,7 +68,8 @@ const submit = async () => {
     toast.success(mode.value === "login" ? "Logged in" : "Account created");
     await router.push("/batch");
   } catch (error) {
-    toast.error(getAuthErrorMessage(error));
+    authError.value = getAuthErrorMessage(error);
+    toast.error(authError.value);
   } finally {
     isSubmitting.value = false;
   }
@@ -47,6 +77,11 @@ const submit = async () => {
 
 const unlockInputs = () => {
   if (blockAutofill.value) blockAutofill.value = false;
+};
+
+const toggleMode = () => {
+  mode.value = mode.value === "login" ? "register" : "login";
+  authError.value = "";
 };
 
 onMounted(async () => {
@@ -81,6 +116,13 @@ onMounted(async () => {
             : "Register the first account to start managing tenants and matrices."
         }}
       </p>
+      <div
+        v-if="authError"
+        class="mt-4 rounded-xl border border-rose-400/45 bg-rose-950/35 px-3 py-2.5 text-sm text-rose-100"
+        role="alert"
+      >
+        {{ authError }}
+      </div>
 
       <form class="mt-6 space-y-3" @submit.prevent="submit" autocomplete="off">
         <input
@@ -141,7 +183,7 @@ onMounted(async () => {
         <button
           v-if="canRegister"
           type="button"
-          @click="mode = mode === 'login' ? 'register' : 'login'"
+          @click="toggleMode"
           class="w-full text-xs text-slate-300 hover:text-cyan-200"
         >
           {{

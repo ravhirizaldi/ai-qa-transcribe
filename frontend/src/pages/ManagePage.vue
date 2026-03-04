@@ -1283,6 +1283,20 @@ onMounted(async () => {
                 <p class="panel-title">QA Evaluation Matrix</p>
                 <p class="msg-muted" v-if="activeProject">
                   Project: {{ activeProject.name }}
+                  <span
+                    class="policy-badge"
+                    :class="
+                      activeProject.ceScoringPolicy === 'weighted_ce_independent'
+                        ? 'policy-badge-weighted'
+                        : 'policy-badge-strict'
+                    "
+                  >
+                    {{
+                      activeProject.ceScoringPolicy === "weighted_ce_independent"
+                        ? "CE Weighted"
+                        : "CE Strict"
+                    }}
+                  </span>
                 </p>
               </div>
               <div class="toggle-row">
@@ -2284,6 +2298,28 @@ onMounted(async () => {
 .msg-muted {
   font-size: 0.75rem;
   color: #94a3b8;
+}
+
+.policy-badge {
+  display: inline-block;
+  margin-left: 0.45rem;
+  padding: 0.08rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.policy-badge-strict {
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  background: rgba(127, 29, 29, 0.3);
+}
+
+.policy-badge-weighted {
+  color: #bbf7d0;
+  border: 1px solid rgba(74, 222, 128, 0.5);
+  background: rgba(20, 83, 45, 0.35);
 }
 
 .msg-error {
