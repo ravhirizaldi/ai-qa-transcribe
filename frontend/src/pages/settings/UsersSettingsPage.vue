@@ -37,10 +37,12 @@ const showCreateModal = ref(false);
 const showEditorModal = ref(false);
 
 const createUserForm = ref({
+  fullname: "",
   email: "",
   password: "",
   isRestricted: true,
 });
+const editFullname = ref("");
 const editEmail = ref("");
 const newPassword = ref("");
 
@@ -107,6 +109,7 @@ const onPickUser = (user: SettingsUser) => {
     .map((project) => project.id);
 
   selectedUserId.value = user.id;
+  editFullname.value = user.fullname;
   editEmail.value = user.email;
   newPassword.value = "";
   form.value = {
@@ -126,7 +129,7 @@ const onPickUser = (user: SettingsUser) => {
 };
 
 const openCreateModal = () => {
-  createUserForm.value = { email: "", password: "", isRestricted: true };
+  createUserForm.value = { fullname: "", email: "", password: "", isRestricted: true };
   showCreateModal.value = true;
 };
 
@@ -149,6 +152,7 @@ const createUser = async () => {
   try {
     const created = await createSettingsUser({
       email: createUserForm.value.email.trim(),
+      fullname: createUserForm.value.fullname.trim() || undefined,
       password: createUserForm.value.password,
       isRestricted: createUserForm.value.isRestricted,
     });
@@ -301,6 +305,7 @@ const load = async (preferredUserId?: string) => {
 const save = async () => {
   if (!selectedUser.value) return;
   const email = editEmail.value.trim();
+  const fullname = editFullname.value.trim();
   const password = newPassword.value.trim();
 
   if (!email) {
@@ -317,7 +322,10 @@ const save = async () => {
   }
 
   const user = selectedUser.value;
-  const hasProfileChange = email !== user.email || form.value.isRestricted !== user.isRestricted;
+  const hasProfileChange =
+    email !== user.email ||
+    fullname !== user.fullname ||
+    form.value.isRestricted !== user.isRestricted;
   const hasAccessChange =
     JSON.stringify(normalizeAccessAssignments(form.value.assignments)) !==
     JSON.stringify(currentUserAccessAssignments(user));
@@ -336,6 +344,7 @@ const save = async () => {
       tasks.push(
         updateSettingsUser(user.id, {
           email,
+          fullname,
           isRestricted: form.value.isRestricted,
         }),
       );
@@ -394,6 +403,7 @@ onMounted(() => {
         <table class="users-table">
           <thead>
             <tr>
+              <th>Full Name</th>
               <th>Email</th>
               <th>Access</th>
               <th>Roles</th>
@@ -402,6 +412,7 @@ onMounted(() => {
           </thead>
           <tbody>
             <tr v-for="user in pagedUsers" :key="user.id">
+              <td>{{ user.fullname }}</td>
               <td>{{ user.email }}</td>
               <td>{{ user.isRestricted ? "Restricted" : "Super Admin" }}</td>
               <td>{{ user.assignments.length }}</td>
@@ -410,7 +421,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="!pagedUsers.length">
-              <td colspan="4" class="muted">No users found.</td>
+              <td colspan="5" class="muted">No users found.</td>
             </tr>
           </tbody>
         </table>
@@ -440,6 +451,8 @@ onMounted(() => {
             <h3 class="subtitle">Add User</h3>
           </div>
           <div class="modal-body">
+            <label class="label">Full Name</label>
+            <input v-model="createUserForm.fullname" class="input" placeholder="User" />
             <label class="label">Email</label>
             <input v-model="createUserForm.email" class="input" placeholder="user@example.com" />
             <label class="label">Initial Password</label>
@@ -465,6 +478,8 @@ onMounted(() => {
             <button class="btn-ghost" @click="showEditorModal = false">Close</button>
           </div>
           <div class="modal-body">
+            <label class="label">Full Name</label>
+            <input v-model="editFullname" class="input" placeholder="User" />
             <label class="label">Email</label>
             <input v-model="editEmail" class="input" placeholder="user@example.com" />
 
@@ -603,19 +618,23 @@ onMounted(() => {
 }
 .users-table th:nth-child(1),
 .users-table td:nth-child(1) {
-  width: 46%;
+  width: 24%;
 }
 .users-table th:nth-child(2),
 .users-table td:nth-child(2) {
-  width: 20%;
+  width: 32%;
 }
 .users-table th:nth-child(3),
 .users-table td:nth-child(3) {
-  width: 10%;
+  width: 16%;
 }
 .users-table th:nth-child(4),
 .users-table td:nth-child(4) {
-  width: 24%;
+  width: 8%;
+}
+.users-table th:nth-child(5),
+.users-table td:nth-child(5) {
+  width: 20%;
 }
 .align-right {
   text-align: right !important;

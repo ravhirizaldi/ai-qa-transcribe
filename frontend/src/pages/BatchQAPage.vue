@@ -37,6 +37,7 @@ import {
   subscribeBatch,
   subscribeJob,
   type BatchHistoryItem,
+  type BatchDetail,
   type JobDetail,
   type JobScoreHistoryEntry,
   type Project,
@@ -65,7 +66,7 @@ const tenantPreviewStats = ref<
   >
 >({});
 const loadingTenantPreviewStats = ref(false);
-const batchDetails = ref<any | null>(null);
+const batchDetails = ref<BatchDetail | null>(null);
 const selectedJobId = ref("");
 const selectedJobDetail = ref<JobDetail | null>(null);
 const loadingJobDetail = ref(false);
@@ -378,6 +379,18 @@ const hasQueuedJobs = computed(() =>
 );
 const selectedHistoryBatch = computed(
   () => history.value.find((batch) => batch.id === selectedBatchId.value) || null,
+);
+const selectedBatchCreatorName = computed(() => {
+  const name =
+    selectedHistoryBatch.value?.createdByFullname ||
+    batchDetails.value?.createdByFullname ||
+    "";
+  return String(name || "User");
+});
+const liveQaDashboardTitle = computed(() =>
+  selectedBatchId.value
+    ? `Live QA Dashboard | Created by ${selectedBatchCreatorName.value}`
+    : "Live QA Dashboard",
 );
 const isBatchViewOnlyLocked = computed(() =>
   Boolean(selectedHistoryBatch.value?.isLocked ?? batchDetails.value?.isLocked),
@@ -1663,7 +1676,7 @@ onUnmounted(() => {
                 </div>
 
                 <div class="work-panel panel-card">
-                  <p class="panel-title">Live QA Dashboard</p>
+                  <p class="panel-title">{{ liveQaDashboardTitle }}</p>
                   <div class="dashboard-grid">
                     <div class="dashboard-item">
                       <span>Total</span>
@@ -2184,7 +2197,12 @@ onUnmounted(() => {
                               {{
                                 new Date(entry.createdAt).toLocaleString()
                               }} |
-                              {{ entry.editedByEmail || entry.editedBy }}
+                              {{
+                                entry.editedByFullname ||
+                                entry.editedByEmail ||
+                                entry.editedBy ||
+                                "User"
+                              }}
                             </p>
                             <p class="score-history-note">
                               {{ entry.reasonNote }}

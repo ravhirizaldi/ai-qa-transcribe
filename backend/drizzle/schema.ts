@@ -42,6 +42,7 @@ export const jobScoreEditChangeSourceEnum = pgEnum("job_score_edit_change_source
 export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
   email: text("email").notNull().unique(),
+  fullname: text("fullname").default("User").notNull(),
   passwordHash: text("password_hash").notNull(),
   isRestricted: boolean("is_restricted").default(false).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

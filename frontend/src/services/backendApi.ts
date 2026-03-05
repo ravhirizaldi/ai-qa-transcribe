@@ -45,7 +45,7 @@ export const register = async (email: string, password: string) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string } }>(
+  return parse<{ token: string; user: { id: string; email: string; fullname: string } }>(
     response,
   );
 };
@@ -56,7 +56,7 @@ export const login = async (email: string, password: string) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string } }>(
+  return parse<{ token: string; user: { id: string; email: string; fullname: string } }>(
     response,
   );
 };
@@ -69,6 +69,7 @@ export const getAuthBootstrapStatus = async () => {
 export type AuthMe = {
   id: string;
   email: string;
+  fullname: string;
   isRestricted: boolean;
   permissions: string[];
 };
@@ -102,6 +103,8 @@ export type BatchHistoryItem = {
   id: string;
   tenantId: string;
   projectId: string;
+  createdBy: string;
+  createdByFullname: string;
   callType: "inbound" | "outbound";
   status: string;
   createdAt: string;
@@ -112,6 +115,28 @@ export type BatchHistoryItem = {
   totalJobs: number;
   completedJobs: number;
   failedJobs: number;
+};
+
+export type BatchDetail = {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  createdBy: string;
+  createdByFullname: string;
+  callType: "inbound" | "outbound";
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  lockDays?: number;
+  lockAt?: string;
+  isLocked?: boolean;
+  jobs: Array<{
+    id: string;
+    status: string;
+    fileName: string;
+    progress: number;
+    errorMessage?: string | null;
+  }>;
 };
 
 export type JobEvaluationTableRow = {
@@ -163,6 +188,7 @@ export type JobScoreHistoryEntry = {
   createdAt: string;
   editedBy: string;
   editedByEmail: string | null;
+  editedByFullname: string;
 };
 
 export type MatrixCallType = "inbound" | "outbound";
@@ -238,6 +264,7 @@ export type UserRoleAssignment = {
 export type SettingsUser = {
   id: string;
   email: string;
+  fullname: string;
   isRestricted: boolean;
   createdAt: string;
   updatedAt: string;
@@ -247,6 +274,7 @@ export type SettingsUser = {
 export type SettingsUserProfile = {
   id: string;
   email: string;
+  fullname: string;
   isRestricted: boolean;
   createdAt: string;
   updatedAt: string;
@@ -584,6 +612,7 @@ export const updateSettingsUserAccess = async (
 
 export const createSettingsUser = async (payload: {
   email: string;
+  fullname?: string;
   password: string;
   isRestricted?: boolean;
 }) => {
@@ -599,6 +628,7 @@ export const updateSettingsUser = async (
   userId: string,
   payload: {
     email?: string;
+    fullname?: string;
     isRestricted?: boolean;
   },
 ) => {
@@ -727,7 +757,7 @@ export const getBatch = async (batchId: string) => {
   const response = await fetch(`${API_BASE}/batches/${batchId}`, {
     headers: withAuth(),
   });
-  return parse<any>(response);
+  return parse<BatchDetail>(response);
 };
 
 export const getJob = async (jobId: string) => {

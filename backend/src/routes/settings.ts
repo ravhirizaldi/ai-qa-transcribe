@@ -56,21 +56,28 @@ const UserAccessSchema = z.object({
 const CreateUserSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
+  fullname: z.string().max(120).optional(),
   isRestricted: z.boolean().default(true),
 });
 
 const UpdateUserSchema = z
   .object({
     email: z.string().email().optional(),
+    fullname: z.string().max(120).optional(),
     isRestricted: z.boolean().optional(),
   })
-  .refine((data) => data.email !== undefined || data.isRestricted !== undefined, {
+  .refine((data) => data.email !== undefined || data.fullname !== undefined || data.isRestricted !== undefined, {
     message: "No changes provided",
   });
 
 const UpdatePasswordSchema = z.object({
   password: z.string().min(8),
 });
+
+const normalizeFullname = (value: string | null | undefined) => {
+  const name = String(value || "").trim();
+  return name || "User";
+};
 
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
   const activeJobStatuses = new Set(["queued", "uploading", "transcribing", "analyzing"]);
@@ -88,12 +95,14 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       .insert(users)
       .values({
         email: body.email,
+        fullname: normalizeFullname(body.fullname),
         passwordHash: hashPassword(body.password),
         isRestricted: body.isRestricted,
       })
       .returning({
         id: users.id,
         email: users.email,
+        fullname: users.fullname,
         isRestricted: users.isRestricted,
         createdAt: users.createdAt,
         updatedAt: users.updatedAt,
@@ -107,7 +116,14 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     const [allUsers, assignmentRows, roleRows] = await Promise.all([
       db.query.users.findMany({
-        columns: { id: true, email: true, isRestricted: true, createdAt: true, updatedAt: true },
+        columns: {
+          id: true,
+          email: true,
+          fullname: true,
+          isRestricted: true,
+          createdAt: true,
+          updatedAt: true,
+        },
       }),
       db
         .select({
@@ -182,6 +198,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       .update(users)
       .set({
         ...(body.email !== undefined ? { email: body.email } : {}),
+        ...(body.fullname !== undefined ? { fullname: normalizeFullname(body.fullname) } : {}),
         ...(body.isRestricted !== undefined ? { isRestricted: body.isRestricted } : {}),
         updatedAt: new Date(),
       })
@@ -189,6 +206,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       .returning({
         id: users.id,
         email: users.email,
+        fullname: users.fullname,
         isRestricted: users.isRestricted,
         createdAt: users.createdAt,
         updatedAt: users.updatedAt,

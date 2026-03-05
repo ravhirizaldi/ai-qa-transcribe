@@ -9,7 +9,13 @@ import { listUserRoleAssignments } from "../repos/access.js";
 const RegisterSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
+  fullname: z.string().max(120).optional(),
 });
+
+const normalizeFullname = (value: string | null | undefined) => {
+  const name = String(value || "").trim();
+  return name || "User";
+};
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
   const canRegister = async () => {
@@ -42,12 +48,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       .insert(users)
       .values({
         email: payload.email,
+        fullname: normalizeFullname(payload.fullname),
         passwordHash: hashPassword(payload.password),
       })
       .returning();
 
     const token = await reply.jwtSign({ sub: created.id, email: created.email });
-    return { token, user: { id: created.id, email: created.email } };
+    return {
+      token,
+      user: {
+        id: created.id,
+        email: created.email,
+        fullname: normalizeFullname(created.fullname),
+      },
+    };
   });
 
   app.post("/auth/login", async (request, reply) => {
@@ -58,14 +72,21 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const token = await reply.jwtSign({ sub: user.id, email: user.email });
-    return { token, user: { id: user.id, email: user.email } };
+    return {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: normalizeFullname(user.fullname),
+      },
+    };
   });
 
   app.get("/auth/me", { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as any).sub as string;
     const user = await db.query.users.findFirst({
       where: eq(users.id, userId),
-      columns: { id: true, email: true, isRestricted: true },
+      columns: { id: true, email: true, fullname: true, isRestricted: true },
     });
     if (!user) {
       return reply.code(404).send({ message: "User not found" });
@@ -82,6 +103,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     return {
       id: user.id,
       email: user.email,
+      fullname: normalizeFullname(user.fullname),
       isRestricted: user.isRestricted,
       permissions: [...permissionSet],
     };

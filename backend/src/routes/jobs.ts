@@ -33,6 +33,10 @@ const BATCH_HISTORY_LOCKED_MESSAGE =
 const STRICT_CE_POLICY = "strict_zero_all_ce_if_any_fail" as const;
 const SCORE_EDIT_SOURCE_MANUAL = "manual" as const;
 const SCORE_EDIT_SOURCE_STRICT_AUTO = "ce_strict_auto" as const;
+const resolveUserFullname = (value: string | null | undefined) => {
+  const name = String(value || "").trim();
+  return name || "User";
+};
 
 const normalizeBatchHistoryLockDays = (value: number | null | undefined) => {
   const days = Number(value ?? DEFAULT_BATCH_HISTORY_LOCK_DAYS);
@@ -75,6 +79,15 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         where: eq(batches.projectId, params.projectId),
         orderBy: (t, { desc }) => [desc(t.createdAt)],
       });
+      const creatorIds = [...new Set(projectBatches.map((batch) => batch.userId))];
+      const creators =
+        creatorIds.length > 0
+          ? await db.query.users.findMany({
+              where: inArray(users.id, creatorIds),
+              columns: { id: true, fullname: true },
+            })
+          : [];
+      const creatorsById = new Map(creators.map((user) => [user.id, user]));
 
       const batchIds = projectBatches.map((batch) => batch.id);
       const allJobs =
@@ -96,6 +109,10 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
           status: batch.status,
           createdAt: batch.createdAt,
           updatedAt: batch.updatedAt,
+          createdBy: batch.userId,
+          createdByFullname: resolveUserFullname(
+            creatorsById.get(batch.userId)?.fullname,
+          ),
           ...getBatchLockMeta(batch.createdAt, lockDays),
           totalJobs: batchJobs.length,
           completedJobs,
@@ -447,6 +464,10 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       batch.createdAt,
       normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
     );
+    const creator = await db.query.users.findFirst({
+      where: eq(users.id, batch.userId),
+      columns: { id: true, fullname: true },
+    });
 
     const batchJobs = await db.query.jobs.findMany({
       where: eq(jobs.batchId, params.batchId),
@@ -461,6 +482,8 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       status: batch.status,
       createdAt: batch.createdAt,
       updatedAt: batch.updatedAt,
+      createdBy: batch.userId,
+      createdByFullname: resolveUserFullname(creator?.fullname),
       ...lockMeta,
       jobs: batchJobs.map((j) => ({
         id: j.id,
@@ -783,13 +806,17 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         createdAt: jobScoreEditHistory.createdAt,
         editedBy: jobScoreEditHistory.editedBy,
         editedByEmail: users.email,
+        editedByFullname: users.fullname,
       })
       .from(jobScoreEditHistory)
       .leftJoin(users, eq(jobScoreEditHistory.editedBy, users.id))
       .where(eq(jobScoreEditHistory.jobId, job.id))
       .orderBy(desc(jobScoreEditHistory.createdAt));
 
-    return historyRows;
+    return historyRows.map((row) => ({
+      ...row,
+      editedByFullname: resolveUserFullname(row.editedByFullname),
+    }));
   });
 
   app.get("/jobs/:jobId/audio", async (request: any, reply) => {
