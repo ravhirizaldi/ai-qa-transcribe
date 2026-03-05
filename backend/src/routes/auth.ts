@@ -4,6 +4,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { db } from "../db.js";
 import { users } from "../../drizzle/schema.js";
 import { hashPassword, verifyPassword } from "../auth.js";
+import { listUserRoleAssignments } from "../repos/access.js";
 
 const RegisterSchema = z.object({
   email: z.string().email(),
@@ -58,5 +59,31 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
     const token = await reply.jwtSign({ sub: user.id, email: user.email });
     return { token, user: { id: user.id, email: user.email } };
+  });
+
+  app.get("/auth/me", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const user = await db.query.users.findFirst({
+      where: eq(users.id, userId),
+      columns: { id: true, email: true, isRestricted: true },
+    });
+    if (!user) {
+      return reply.code(404).send({ message: "User not found" });
+    }
+
+    const assignments = user.isRestricted ? await listUserRoleAssignments(userId) : [];
+    const permissionSet = new Set<string>();
+    for (const assignment of assignments) {
+      for (const permission of assignment.permissions) {
+        permissionSet.add(permission);
+      }
+    }
+
+    return {
+      id: user.id,
+      email: user.email,
+      isRestricted: user.isRestricted,
+      permissions: [...permissionSet],
+    };
   });
 };

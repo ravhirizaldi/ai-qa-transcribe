@@ -8,7 +8,7 @@ import {
   projectMatrixVersions,
   projects,
 } from "../../drizzle/schema.js";
-import { assertProjectAccess, assertTenantAccess } from "../repos/access.js";
+import { assertProjectPermission, assertTenantAccess } from "../repos/access.js";
 
 const MatrixRowsSchema = z.array(
   z.object({
@@ -50,7 +50,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:view");
 
       return db.query.projectMatrixVersions.findMany({
         where: and(
@@ -72,7 +72,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
       const rows = MatrixRowsSchema.parse((request.body as { rows?: unknown })?.rows ?? []);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
       await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const [current] = await db
@@ -124,7 +124,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
       await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({
@@ -175,7 +175,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:view");
 
       const version = await db.query.projectMatrixVersions.findFirst({
         where: and(
@@ -214,7 +214,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:view");
 
       const version = await db.query.projectMatrixVersions.findFirst({
         where: and(
@@ -253,7 +253,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
       const rows = MatrixRowsSchema.parse((request.body as { rows?: unknown })?.rows ?? []);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
       await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({
@@ -299,7 +299,7 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
-      await assertProjectAccess(project.tenantId, project.id, (request.user as any).sub);
+      await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
       await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({

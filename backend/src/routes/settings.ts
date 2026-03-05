@@ -249,6 +249,16 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
     const params = z.object({ userId: z.string().uuid() }).parse(request.params);
     const body = UserAccessSchema.parse(request.body);
+    if (
+      body.assignments.some(
+        (assignment) =>
+          assignment.scope.includeAllTenants === true || assignment.scope.includeAllProjects === true,
+      )
+    ) {
+      return reply
+        .code(400)
+        .send({ message: "All tenants/projects shortcuts are disabled. Select scopes manually." });
+    }
     const target = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
     if (!target) {
       return reply.code(404).send({ message: "User not found" });

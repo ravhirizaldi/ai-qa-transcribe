@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Mic, LayoutDashboard, Users, Settings, LogOut } from "lucide-vue-next";
 import { useSession } from "./services/session";
+import { getAuthMe } from "./services/backendApi";
 
 const route = useRoute();
 const router = useRouter();
@@ -11,6 +12,9 @@ const session = useSession();
 const isAuthenticated = computed(() => Boolean(session.token.value));
 const isLoginPage = computed(() => route.path === "/login");
 const isSettingsRoute = computed(() => route.path.startsWith("/settings"));
+const isManageRoute = computed(() => route.path.startsWith("/manage"));
+const canAccessSettings = ref(false);
+const canAccessManage = ref(false);
 
 const showLogoutConfirm = ref(false);
 
@@ -23,6 +27,64 @@ const confirmLogoutAction = async () => {
   showLogoutConfirm.value = false;
   await router.push("/login");
 };
+
+const refreshSettingsAccess = async () => {
+  if (!session.token.value) {
+    canAccessSettings.value = false;
+    canAccessManage.value = false;
+    return;
+  }
+
+  try {
+    const me = await getAuthMe();
+    if (!me.isRestricted) {
+      canAccessSettings.value = true;
+      canAccessManage.value = true;
+      return;
+    }
+
+    const permissionSet = new Set(me.permissions);
+    canAccessSettings.value =
+      permissionSet.has("settings:view") ||
+      permissionSet.has("settings:manage") ||
+      permissionSet.has("users:manage") ||
+      permissionSet.has("roles:manage") ||
+      permissionSet.has("system:manage");
+
+    canAccessManage.value =
+      permissionSet.has("tenants:view") ||
+      permissionSet.has("tenants:manage") ||
+      permissionSet.has("projects:view") ||
+      permissionSet.has("projects:manage") ||
+      permissionSet.has("matrices:view") ||
+      permissionSet.has("matrices:manage");
+  } catch {
+    canAccessSettings.value = false;
+    canAccessManage.value = false;
+    if (isSettingsRoute.value) {
+      await router.replace("/batch");
+    }
+    if (isManageRoute.value) {
+      await router.replace("/batch");
+    }
+    return;
+  }
+
+  if (!canAccessSettings.value && isSettingsRoute.value) {
+    await router.replace("/batch");
+  }
+  if (!canAccessManage.value && isManageRoute.value) {
+    await router.replace("/batch");
+  }
+};
+
+watch(
+  () => session.token.value,
+  () => {
+    void refreshSettingsAccess();
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -35,7 +97,7 @@ const confirmLogoutAction = async () => {
       class="sticky top-0 z-50 border-b border-white/10 bg-black/30 backdrop-blur-xl"
       v-if="!isLoginPage"
     >
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="w-full px-4 sm:px-6 lg:px-8">
         <div class="flex flex-wrap gap-3 items-center justify-between py-4">
           <div class="flex items-center gap-4">
             <div class="brand-mark">
@@ -64,6 +126,7 @@ const confirmLogoutAction = async () => {
                 <span>QA Calculation</span>
               </RouterLink>
               <RouterLink
+                v-if="canAccessManage"
                 to="/manage"
                 class="page-link"
                 active-class="page-link-active"
@@ -72,6 +135,7 @@ const confirmLogoutAction = async () => {
                 <span>Tenants</span>
               </RouterLink>
               <RouterLink
+                v-if="canAccessSettings"
                 to="/settings/users"
                 :class="['page-link', { 'page-link-active': isSettingsRoute }]"
               >

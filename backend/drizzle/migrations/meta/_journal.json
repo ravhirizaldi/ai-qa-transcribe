@@ -64,6 +64,20 @@
       "when": 1772503200000,
       "tag": "0008_ce_scoring_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1772602200000,
+      "tag": "0009_batch_history_lock_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1772688600000,
+      "tag": "0010_job_score_edit_history",
+      "breakpoints": true
     }
   ]
 }

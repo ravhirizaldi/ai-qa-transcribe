@@ -14,12 +14,14 @@ interface QAScorecard {
   summary: string;
   evaluation_table: {
     area: string;
+    row_index?: number;
     evidence_timestamp: string;
     note: string;
     score: number;
     max_score?: number;
     parameter?: string;
     description?: string;
+    is_edited?: boolean;
   }[];
   red_flags: string | null;
   routing: string;
@@ -236,25 +238,6 @@ const onEvidenceClick = (raw: string) => {
       </p>
     </section>
 
-    <section class="info-card mb-5">
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-        <div>
-          <p class="text-slate-400 text-xs uppercase tracking-[0.14em]">
-            Routing
-          </p>
-          <p class="text-slate-100 font-medium mt-1">
-            {{ analysis.routing || "N/A" }}
-          </p>
-        </div>
-        <div v-if="analysis.red_flags">
-          <p class="text-rose-300 text-xs uppercase tracking-[0.14em]">
-            Red Flags
-          </p>
-          <p class="text-rose-100 mt-1">{{ analysis.red_flags }}</p>
-        </div>
-      </div>
-    </section>
-
     <section class="mb-6">
       <h3 class="section-title">Evaluation Matrix</h3>
       <div class="table-wrap mt-2">
@@ -295,7 +278,10 @@ const onEvidenceClick = (raw: string) => {
             <tr
               v-for="(row, idx) in analysis.evaluation_table"
               :key="idx"
-              class="border-b border-slate-800/80 hover:bg-slate-800/35 transition-colors"
+              :class="[
+                'border-b border-slate-800/80 hover:bg-slate-800/35 transition-colors',
+                row.is_edited ? 'matrix-row-edited' : '',
+              ]"
             >
               <td class="px-3 py-2.5 text-center w-10">
                 <div
@@ -333,7 +319,9 @@ const onEvidenceClick = (raw: string) => {
               <td class="px-3 py-2.5 font-mono text-center w-24">
                 <span
                   :class="
-                    row.score === (row.max_score || 0)
+                    row.is_edited
+                      ? 'text-cyan-300 font-semibold'
+                      : row.score === (row.max_score || 0)
                       ? 'text-emerald-300'
                       : 'text-rose-300 font-bold'
                   "
@@ -341,6 +329,7 @@ const onEvidenceClick = (raw: string) => {
                   {{ row.score }}
                 </span>
                 <span class="text-slate-500 text-xs">/{{ row.max_score }}</span>
+                <span v-if="row.is_edited" class="edited-badge">Edited</span>
               </td>
               <td
                 class="px-3 py-2.5 font-mono text-cyan-300 whitespace-nowrap w-1/6"
@@ -448,6 +437,24 @@ const onEvidenceClick = (raw: string) => {
   border-radius: 0.8rem;
   border: 1px solid rgba(148, 163, 184, 0.2);
   overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+
+.matrix-row-edited {
+  background: rgba(14, 116, 144, 0.16);
+}
+
+.edited-badge {
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  background: rgba(8, 145, 178, 0.25);
+  color: #67e8f9;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.36rem;
+  text-transform: uppercase;
 }
 
 .evidence-link {

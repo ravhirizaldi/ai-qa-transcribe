@@ -74,17 +74,9 @@ watch(
 
 const projectUsersCountById = computed(() => {
   const counts: Record<string, number> = {};
-  const allProjects = Object.values(projectsByTenant.value).flat();
-  const allProjectIds = allProjects.map((project) => project.id);
 
   for (const user of users.value) {
     for (const assignment of user.assignments) {
-      if (assignment.scope.includeAllProjects || assignment.scope.includeAllTenants) {
-        for (const projectId of allProjectIds) {
-          counts[projectId] = (counts[projectId] || 0) + 1;
-        }
-        continue;
-      }
       for (const projectId of assignment.scope.projectIds) {
         counts[projectId] = (counts[projectId] || 0) + 1;
       }
@@ -109,6 +101,11 @@ const removeAssignment = (idx: number) => {
 };
 
 const onPickUser = (user: SettingsUser) => {
+  const allTenantIds = tenants.value.map((tenant) => tenant.id);
+  const allProjectIds = Object.values(projectsByTenant.value)
+    .flat()
+    .map((project) => project.id);
+
   selectedUserId.value = user.id;
   editEmail.value = user.email;
   newPassword.value = "";
@@ -116,10 +113,14 @@ const onPickUser = (user: SettingsUser) => {
     isRestricted: user.isRestricted,
     assignments: user.assignments.map((assignment) => ({
       roleId: assignment.roleId,
-      includeAllTenants: assignment.scope.includeAllTenants,
-      includeAllProjects: assignment.scope.includeAllProjects,
-      tenantIds: [...assignment.scope.tenantIds],
-      projectIds: [...assignment.scope.projectIds],
+      includeAllTenants: false,
+      includeAllProjects: false,
+      tenantIds: assignment.scope.includeAllTenants
+        ? [...allTenantIds]
+        : [...assignment.scope.tenantIds],
+      projectIds: assignment.scope.includeAllProjects
+        ? [...allProjectIds]
+        : [...assignment.scope.projectIds],
     })),
   };
 };
@@ -190,17 +191,28 @@ const toggleFromList = (list: string[], value: string) => {
   return [...set];
 };
 
+const getProjectIdsFromTenantIds = (tenantIds: string[]) => {
+  const allowed = new Set<string>();
+  for (const tenantId of tenantIds) {
+    for (const project of projectsByTenant.value[tenantId] || []) {
+      allowed.add(project.id);
+    }
+  }
+  return allowed;
+};
+
+const toggleTenantForAssignment = (assignment: DraftAssignment, tenantId: string) => {
+  assignment.tenantIds = toggleFromList(assignment.tenantIds, tenantId);
+  const allowedProjectIds = getProjectIdsFromTenantIds(assignment.tenantIds);
+  assignment.projectIds = assignment.projectIds.filter((projectId) => allowedProjectIds.has(projectId));
+};
+
 const getProjectOptionsForAssignment = (assignment: DraftAssignment) => {
-  if (!assignment.includeAllTenants && assignment.tenantIds.length === 0) {
+  if (assignment.tenantIds.length === 0) {
     return [];
   }
 
-  const tenantOptions =
-    assignment.includeAllTenants
-      ? tenants.value
-      : tenants.value.filter((tenant) => assignment.tenantIds.includes(tenant.id));
-
-  const tenantIds = new Set(tenantOptions.map((tenant) => tenant.id));
+  const tenantIds = new Set(assignment.tenantIds);
 
   const baseProjects = Object.values(projectsByTenant.value)
     .flat()
@@ -228,8 +240,8 @@ const normalizeAccessAssignments = (assignments: DraftAssignment[]) =>
   assignments
     .map((assignment) => ({
       roleId: assignment.roleId,
-      includeAllTenants: assignment.includeAllTenants,
-      includeAllProjects: assignment.includeAllProjects,
+      includeAllTenants: false,
+      includeAllProjects: false,
       tenantIds: [...assignment.tenantIds].sort(),
       projectIds: [...assignment.projectIds].sort(),
     }))
@@ -243,8 +255,8 @@ const currentUserAccessAssignments = (user: SettingsUser) =>
   normalizeAccessAssignments(
     user.assignments.map((assignment) => ({
       roleId: assignment.roleId,
-      includeAllTenants: assignment.scope.includeAllTenants,
-      includeAllProjects: assignment.scope.includeAllProjects,
+      includeAllTenants: false,
+      includeAllProjects: false,
       tenantIds: assignment.scope.tenantIds,
       projectIds: assignment.scope.projectIds,
     })),
@@ -336,8 +348,8 @@ const save = async () => {
           assignments: form.value.assignments.map((assignment) => ({
             roleId: assignment.roleId,
             scope: {
-              includeAllTenants: assignment.includeAllTenants,
-              includeAllProjects: assignment.includeAllProjects,
+              includeAllTenants: false,
+              includeAllProjects: false,
               tenantIds: assignment.tenantIds,
               projectIds: assignment.projectIds,
             },
@@ -480,31 +492,20 @@ onMounted(() => {
                 <option v-for="role in roles" :key="role.id" :value="role.id">{{ role.name }}</option>
               </select>
 
-              <div class="checks">
-                <label class="check-row">
-                  <input v-model="assignment.includeAllTenants" type="checkbox" />
-                  <span>All tenants</span>
-                </label>
-                <label class="check-row">
-                  <input v-model="assignment.includeAllProjects" type="checkbox" />
-                  <span>All projects</span>
-                </label>
-              </div>
-
               <p class="label">Tenants scope</p>
               <div class="tag-list">
                 <label v-for="tenant in tenants" :key="tenant.id" class="tag-check">
                   <input
                     type="checkbox"
                     :checked="assignment.tenantIds.includes(tenant.id)"
-                    @change="assignment.tenantIds = toggleFromList(assignment.tenantIds, tenant.id)"
+                    @change="toggleTenantForAssignment(assignment, tenant.id)"
                   />
                   <span>{{ tenant.name }}</span>
                 </label>
               </div>
 
               <p class="label">Projects scope</p>
-              <p v-if="!assignment.includeAllTenants && assignment.tenantIds.length === 0" class="muted tiny">
+              <p v-if="assignment.tenantIds.length === 0" class="muted tiny">
                 Select tenant scope first to load projects.
               </p>
               <div class="tag-list">

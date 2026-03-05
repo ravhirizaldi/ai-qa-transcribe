@@ -2,7 +2,6 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db.js";
 import {
   accessRoles,
-  projectMemberships,
   projectMatrixVersions,
   projects,
   tenantMemberships,
@@ -15,14 +14,15 @@ type CallType = "inbound" | "outbound";
 type TenantMembershipRole = "owner" | "admin" | "member" | "viewer";
 
 export const AVAILABLE_PERMISSION_KEYS = [
+  "qa.read",
   "tenants:view",
   "tenants:manage",
   "projects:view",
   "projects:manage",
   "matrices:view",
   "matrices:manage",
-  "jobs:view",
   "jobs:manage",
+  "scores:manage",
   "settings:view",
   "settings:manage",
   "users:manage",
@@ -127,6 +127,16 @@ const getParsedRoleAssignments = async (userId: string): Promise<ParsedRoleAssig
 
 const hasPermission = (permissions: PermissionKey[], needed: PermissionKey) => {
   if (permissions.includes(needed)) return true;
+  if (permissions.includes("jobs:manage") && needed === "projects:view") {
+    // QA job managers must be able to resolve scoped project lists in the workspace.
+    return true;
+  }
+  if (
+    permissions.includes("qa.read") &&
+    (needed === "projects:view" || needed === "matrices:view")
+  ) {
+    return true;
+  }
   if (needed.endsWith(":view")) {
     const elevated = needed.replace(":view", ":manage") as PermissionKey;
     return permissions.includes(elevated);
@@ -146,8 +156,10 @@ const tenantScopeIncludes = (scope: RoleScope, tenantId: string) => {
   return scope.includeAllTenants || scope.tenantIds.includes(tenantId);
 };
 
-const projectScopeIncludes = (scope: RoleScope, projectId: string) => {
-  return scope.includeAllProjects || scope.projectIds.includes(projectId);
+const projectScopeIncludes = (scope: RoleScope, tenantId: string, projectId: string) => {
+  if (scope.projectIds.includes(projectId)) return true;
+  // Hybrid policy: includeAllProjects expands within tenant scope, never globally.
+  return scope.includeAllProjects && tenantScopeIncludes(scope, tenantId);
 };
 
 const hasScopedTenantPermission = async (
@@ -155,29 +167,23 @@ const hasScopedTenantPermission = async (
   tenantId: string,
   permission: PermissionKey,
 ) => {
-  const projectScopedRoleRows = assignments
-    .filter((assignment) => hasPermission(assignment.permissions, permission))
-    .filter((assignment) => assignment.scope.projectIds.length > 0);
+  const candidates = assignments.filter((assignment) =>
+    hasPermission(assignment.permissions, permission),
+  );
+  if (!candidates.length) return false;
 
-  const scopedProjectIds = [
-    ...new Set(projectScopedRoleRows.flatMap((assignment) => assignment.scope.projectIds)),
-  ];
-
-  let projectTenantMatch = false;
-  if (scopedProjectIds.length) {
-    const scopedProjects = await db.query.projects.findMany({
-      where: inArray(projects.id, scopedProjectIds),
-      columns: { id: true, tenantId: true },
-    });
-    projectTenantMatch = scopedProjects.some((project) => project.tenantId === tenantId);
+  if (candidates.some((assignment) => tenantScopeIncludes(assignment.scope, tenantId))) {
+    return true;
   }
 
-  return assignments.some((assignment) => {
-    if (!hasPermission(assignment.permissions, permission)) return false;
-    if (tenantScopeIncludes(assignment.scope, tenantId)) return true;
-    if (assignment.scope.includeAllProjects) return true;
-    return projectTenantMatch;
+  const scopedProjectIds = [...new Set(candidates.flatMap((assignment) => assignment.scope.projectIds))];
+  if (!scopedProjectIds.length) return false;
+
+  const scopedProjects = await db.query.projects.findMany({
+    where: inArray(projects.id, scopedProjectIds),
+    columns: { tenantId: true },
   });
+  return scopedProjects.some((project) => project.tenantId === tenantId);
 };
 
 const hasScopedProjectPermission = async (
@@ -188,8 +194,8 @@ const hasScopedProjectPermission = async (
 ) => {
   return assignments.some((assignment) => {
     if (!hasPermission(assignment.permissions, permission)) return false;
-    if (tenantScopeIncludes(assignment.scope, tenantId)) return true;
-    return projectScopeIncludes(assignment.scope, projectId);
+    // Tenant scope alone does not grant project access for restricted users.
+    return projectScopeIncludes(assignment.scope, tenantId, projectId);
   });
 };
 
@@ -206,6 +212,17 @@ export const assertSystemPermission = async (userId: string, permission: Permiss
 
 export const listUserRoleAssignments = async (userId: string) => {
   return getParsedRoleAssignments(userId);
+};
+
+export const isSuperAdminUser = async (userId: string) => {
+  const user = await getUser(userId);
+  if (!user.isRestricted) return true;
+
+  const assignment = await db.query.userRoleAssignments.findFirst({
+    where: eq(userRoleAssignments.userId, userId),
+    columns: { id: true },
+  });
+  return !assignment;
 };
 
 export const assertTenantAccess = async (
@@ -246,25 +263,33 @@ export const assertTenantAccess = async (
     return membership;
   }
 
+  if (requireMembership) {
+    // Restricted users still need explicit membership for membership-required operations.
+    throw new Error("Forbidden tenant access");
+  }
+
   const assignments = await getParsedRoleAssignments(userId);
-  if (!assignments.length) {
-    throw new Error("Forbidden tenant access");
+  const permissionsToCheck: PermissionKey[] = [
+    "tenants:view",
+    "qa.read",
+    "projects:view",
+    "matrices:view",
+  ];
+  for (const permission of permissionsToCheck) {
+    const allowed = await hasScopedTenantPermission(assignments, tenantId, permission);
+    if (allowed) {
+      return {
+        id: `role-assignment-${tenantId}-${userId}`,
+        tenantId,
+        userId,
+        role: "viewer",
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      };
+    }
   }
 
-  const needed: PermissionKey = requireMembership ? "tenants:manage" : "tenants:view";
-  const allowed = await hasScopedTenantPermission(assignments, tenantId, needed);
-  if (!allowed) {
-    throw new Error("Forbidden tenant access");
-  }
-
-  return {
-    id: `role-assignment-${tenantId}-${userId}`,
-    tenantId,
-    userId,
-    role: requireMembership ? "owner" : "viewer",
-    createdAt: new Date(0),
-    updatedAt: new Date(0),
-  };
+  throw new Error("Forbidden tenant access");
 };
 
 export const listAccessibleTenants = async (userId: string) => {
@@ -274,16 +299,21 @@ export const listAccessibleTenants = async (userId: string) => {
   }
 
   const [memberships, assignments] = await Promise.all([
-    db.query.tenantMemberships.findMany({ where: eq(tenantMemberships.userId, userId) }),
+    db.query.tenantMemberships.findMany({
+      where: eq(tenantMemberships.userId, userId),
+      columns: { tenantId: true },
+    }),
     getParsedRoleAssignments(userId),
   ]);
+
+  const tenantIds = new Set<string>(memberships.map((membership) => membership.tenantId));
 
   const permissionFiltered = assignments.filter((assignment) =>
     assignment.permissions.some(
       (permission) =>
         hasPermission([permission], "tenants:view") ||
+        hasPermission([permission], "qa.read") ||
         hasPermission([permission], "projects:view") ||
-        hasPermission([permission], "jobs:view") ||
         hasPermission([permission], "matrices:view"),
     ),
   );
@@ -292,10 +322,9 @@ export const listAccessibleTenants = async (userId: string) => {
     return db.query.tenants.findMany();
   }
 
-  const tenantIds = new Set<string>(memberships.map((membership) => membership.tenantId));
   for (const assignment of permissionFiltered) {
-    for (const tenantId of assignment.scope.tenantIds) {
-      tenantIds.add(tenantId);
+    for (const scopedTenantId of assignment.scope.tenantIds) {
+      tenantIds.add(scopedTenantId);
     }
   }
 
@@ -335,18 +364,8 @@ export const assertProjectAccess = async (
     return project;
   }
 
-  const [tenantMembership, projectMembership, assignments] = await Promise.all([
-    db.query.tenantMemberships.findFirst({
-      where: and(eq(tenantMemberships.userId, userId), eq(tenantMemberships.tenantId, tenantId)),
-    }),
-    db.query.projectMemberships.findFirst({
-      where: and(eq(projectMemberships.userId, userId), eq(projectMemberships.projectId, projectId)),
-    }),
-    getParsedRoleAssignments(userId),
-  ]);
-
-  const hasElevatedTenantMembership =
-    tenantMembership && ["owner", "admin"].includes(tenantMembership.role);
+  const assignments = await getParsedRoleAssignments(userId);
+  // Hybrid policy: restricted project access is role-scoped only.
   const hasRoleProjectAccess = await hasScopedProjectPermission(
     assignments,
     tenantId,
@@ -354,7 +373,7 @@ export const assertProjectAccess = async (
     "projects:view",
   );
 
-  if (!projectMembership && !hasElevatedTenantMembership && !hasRoleProjectAccess) {
+  if (!hasRoleProjectAccess) {
     throw new Error("Forbidden project access");
   }
 
@@ -369,30 +388,21 @@ export const listAccessibleProjects = async (tenantId: string, userId: string) =
     });
   }
 
-  const [tenantMembership, projectMembershipRows, assignments] = await Promise.all([
-    db.query.tenantMemberships.findFirst({
-      where: and(eq(tenantMemberships.userId, userId), eq(tenantMemberships.tenantId, tenantId)),
-    }),
-    db.query.projectMemberships.findMany({
-      where: eq(projectMemberships.userId, userId),
-    }),
-    getParsedRoleAssignments(userId),
-  ]);
-
-  if (tenantMembership && ["owner", "admin"].includes(tenantMembership.role)) {
-    return db.query.projects.findMany({
-      where: eq(projects.tenantId, tenantId),
-    });
-  }
+  const assignments = await getParsedRoleAssignments(userId);
 
   const relevantAssignments = assignments.filter((assignment) =>
-    assignment.permissions.some((permission) => hasPermission([permission], "projects:view")),
+    assignment.permissions.some(
+      (permission) =>
+        hasPermission([permission], "projects:view") ||
+        hasPermission([permission], "qa.read") ||
+        hasPermission([permission], "matrices:view"),
+    ),
   );
 
   if (
     relevantAssignments.some(
       (assignment) =>
-        tenantScopeIncludes(assignment.scope, tenantId) || assignment.scope.includeAllProjects,
+        assignment.scope.includeAllProjects && tenantScopeIncludes(assignment.scope, tenantId),
     )
   ) {
     return db.query.projects.findMany({
@@ -400,7 +410,7 @@ export const listAccessibleProjects = async (tenantId: string, userId: string) =
     });
   }
 
-  const scopedProjectIds = new Set<string>(projectMembershipRows.map((membership) => membership.projectId));
+  const scopedProjectIds = new Set<string>();
   for (const assignment of relevantAssignments) {
     for (const projectId of assignment.scope.projectIds) {
       scopedProjectIds.add(projectId);
@@ -419,24 +429,19 @@ export const assertProjectPermission = async (
   userId: string,
   permission: PermissionKey,
 ) => {
-  await assertProjectAccess(tenantId, projectId, userId);
+  await assertTenantAccess(tenantId, userId);
+  const project = await db.query.projects.findFirst({
+    where: and(eq(projects.id, projectId), eq(projects.tenantId, tenantId)),
+    columns: { id: true },
+  });
+  if (!project) {
+    throw new Error("Project not found");
+  }
 
   const user = await getUser(userId);
   if (!user.isRestricted) return;
 
-  if (permission.endsWith(":view")) return;
-
-  const [tenantMembership, assignments] = await Promise.all([
-    db.query.tenantMemberships.findFirst({
-      where: and(eq(tenantMemberships.userId, userId), eq(tenantMemberships.tenantId, tenantId)),
-    }),
-    getParsedRoleAssignments(userId),
-  ]);
-
-  if (tenantMembership && ["owner", "admin"].includes(tenantMembership.role)) {
-    return;
-  }
-
+  const assignments = await getParsedRoleAssignments(userId);
   const allowed = await hasScopedProjectPermission(assignments, tenantId, projectId, permission);
   if (!allowed) {
     throw new Error("Insufficient permissions");

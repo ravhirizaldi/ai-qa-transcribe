@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import {
   AVAILABLE_PERMISSION_KEYS,
@@ -11,10 +12,14 @@ import {
   type PermissionKey,
 } from "../../services/backendApi";
 
+const route = useRoute();
+const router = useRouter();
+
 const roles = ref<AccessRole[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const editingRoleId = ref<string | null>(null);
+const syncingRoute = ref(false);
 
 const form = ref({
   name: "",
@@ -23,6 +28,37 @@ const form = ref({
 });
 
 const isEditing = computed(() => Boolean(editingRoleId.value));
+
+const permissionDescriptions: Record<PermissionKey, string> = {
+  "qa.read":
+    "Read-only QA access: view scoped projects, batches, recordings, matrix, and calculation results.",
+  "tenants:view":
+    "View tenant entries that are in your scope.",
+  "tenants:manage":
+    "Create, edit, and delete tenants, including tenant-level membership operations.",
+  "projects:view":
+    "View project entries and project metadata in your scope.",
+  "projects:manage":
+    "Create, edit, and delete projects in scoped tenants.",
+  "matrices:view":
+    "View QA matrix versions and active matrix rows for scoped projects.",
+  "matrices:manage":
+    "Create, update, activate, and delete matrix versions in scoped projects.",
+  "jobs:manage":
+    "Manage QA processing flow: create batch, upload files, run analyze, retry, and delete jobs/batches.",
+  "scores:manage":
+    "Edit completed recording score rows and view score edit audit history.",
+  "settings:view":
+    "View administration settings pages and non-sensitive configuration status.",
+  "settings:manage":
+    "Manage settings-level configuration where applicable.",
+  "users:manage":
+    "Create users, edit user profiles, and assign access scopes/roles.",
+  "roles:manage":
+    "Create, edit, and delete access roles and their permissions.",
+  "system:manage":
+    "Update system-wide sensitive settings such as provider keys and models.",
+};
 
 const resetForm = () => {
   editingRoleId.value = null;
@@ -72,22 +108,32 @@ const save = async () => {
   saving.value = true;
   try {
     if (editingRoleId.value) {
-      await updateAccessRole(editingRoleId.value, {
+      const updated = await updateAccessRole(editingRoleId.value, {
         name: form.value.name.trim(),
         description: form.value.description.trim() || null,
         permissions: form.value.permissions,
       });
       toast.success("Role updated");
+      await load();
+      const refreshed = roles.value.find((item) => item.id === updated.id);
+      if (refreshed) {
+        editRole(refreshed);
+      }
     } else {
-      await createAccessRole({
+      const created = await createAccessRole({
         name: form.value.name.trim(),
         description: form.value.description.trim() || null,
         permissions: form.value.permissions,
       });
       toast.success("Role created");
+      await load();
+      const refreshed = roles.value.find((item) => item.id === created.id);
+      if (refreshed) {
+        editRole(refreshed);
+      } else {
+        resetForm();
+      }
     }
-    resetForm();
-    await load();
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "Failed to save role");
   } finally {
@@ -112,6 +158,54 @@ const removeRole = async (role: AccessRole) => {
 onMounted(() => {
   void load();
 });
+
+watch(
+  () => editingRoleId.value,
+  async (roleId) => {
+    if (syncingRoute.value) return;
+    const current = typeof route.query.role === "string" ? route.query.role : "";
+    const next = roleId || "";
+    if (current === next) return;
+
+    syncingRoute.value = true;
+    await router.replace({
+      path: "/settings/roles",
+      query: {
+        ...route.query,
+        role: next || undefined,
+      },
+    });
+    syncingRoute.value = false;
+  },
+);
+
+watch(
+  () => route.query.role,
+  (roleQuery) => {
+    if (syncingRoute.value) return;
+    const roleId = typeof roleQuery === "string" ? roleQuery : "";
+    if (!roleId) {
+      if (editingRoleId.value) resetForm();
+      return;
+    }
+    const role = roles.value.find((item) => item.id === roleId);
+    if (role && editingRoleId.value !== role.id) {
+      editRole(role);
+    }
+  },
+);
+
+watch(
+  () => roles.value,
+  () => {
+    const roleId = typeof route.query.role === "string" ? route.query.role : "";
+    if (!roleId) return;
+    const role = roles.value.find((item) => item.id === roleId);
+    if (role && editingRoleId.value !== role.id) {
+      editRole(role);
+    }
+  },
+);
 </script>
 
 <template>
@@ -163,13 +257,23 @@ onMounted(() => {
 
         <p class="label" style="margin-top: 0.7rem">Permissions</p>
         <div class="permission-grid">
-          <label v-for="permission in AVAILABLE_PERMISSION_KEYS" :key="permission" class="check-row">
+          <label
+            v-for="permission in AVAILABLE_PERMISSION_KEYS"
+            :key="permission"
+            class="check-row perm-check"
+          >
             <input
               type="checkbox"
               :checked="form.permissions.includes(permission)"
               @change="togglePermission(permission)"
             />
             <span>{{ permission }}</span>
+            <span class="perm-help" tabindex="0" aria-label="Permission description">
+              ?
+            </span>
+            <span class="perm-tooltip">
+              {{ permissionDescriptions[permission] }}
+            </span>
           </label>
         </div>
 
@@ -292,6 +396,54 @@ onMounted(() => {
   gap: 0.45rem;
   color: #cbd5e1;
   font-size: 0.8rem;
+  position: relative;
+}
+
+.perm-check {
+  padding-right: 0.35rem;
+}
+
+.perm-help {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: #67e8f9;
+  border: 1px solid rgba(103, 232, 249, 0.45);
+  background: rgba(14, 116, 144, 0.2);
+  cursor: help;
+  user-select: none;
+}
+
+.perm-tooltip {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.3rem);
+  z-index: 20;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 0.45rem 0.55rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(100, 116, 139, 0.5);
+  background: rgba(2, 6, 23, 0.97);
+  color: #cbd5e1;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.perm-check:hover .perm-tooltip,
+.perm-help:focus + .perm-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 .actions {
   margin-top: 0.8rem;

@@ -19,6 +19,7 @@ export const ProjectSchema = z.object({
   logoUrl: z.string().nullable(),
   supportsInbound: z.boolean(),
   supportsOutbound: z.boolean(),
+  batchHistoryLockDays: z.number().int().min(1),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

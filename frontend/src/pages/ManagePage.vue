@@ -47,6 +47,7 @@ const projectForm = ref({
   name: "",
   logoUrl: "",
   callType: "inbound" as MatrixCallType,
+  batchHistoryLockDays: 2,
   ceScoringPolicy:
     "strict_zero_all_ce_if_any_fail" as
       | "strict_zero_all_ce_if_any_fail"
@@ -67,6 +68,7 @@ const editProjectForm = ref({
   id: "",
   name: "",
   logoUrl: "",
+  batchHistoryLockDays: 2,
   ceScoringPolicy:
     "strict_zero_all_ce_if_any_fail" as
       | "strict_zero_all_ce_if_any_fail"
@@ -316,6 +318,7 @@ const openProjectModal = (tenantId?: string) => {
     name: "",
     logoUrl: "",
     callType: "inbound",
+    batchHistoryLockDays: 2,
     ceScoringPolicy: "strict_zero_all_ce_if_any_fail",
   };
   showProjectModal.value = true;
@@ -350,6 +353,10 @@ const createProjectAction = async () => {
     toast.error("Project name is required");
     return;
   }
+  if (projectForm.value.batchHistoryLockDays < 1) {
+    toast.error("Batch lock days must be at least 1 day");
+    return;
+  }
 
   creatingProject.value = true;
   try {
@@ -358,6 +365,7 @@ const createProjectAction = async () => {
       logoUrl: projectForm.value.logoUrl.trim() || null,
       supportsInbound: projectForm.value.callType === "inbound",
       supportsOutbound: projectForm.value.callType === "outbound",
+      batchHistoryLockDays: Math.floor(projectForm.value.batchHistoryLockDays),
       ceScoringPolicy: projectForm.value.ceScoringPolicy,
     });
     projectsByTenant.value = {
@@ -622,6 +630,7 @@ const openEditProjectModal = (project: Project) => {
     id: project.id,
     name: project.name,
     logoUrl: project.logoUrl || "",
+    batchHistoryLockDays: project.batchHistoryLockDays || 2,
     ceScoringPolicy:
       project.ceScoringPolicy || "strict_zero_all_ce_if_any_fail",
   };
@@ -654,6 +663,10 @@ const saveProjectEdit = async () => {
     toast.error("Project name is required");
     return;
   }
+  if (editProjectForm.value.batchHistoryLockDays < 1) {
+    toast.error("Batch lock days must be at least 1 day");
+    return;
+  }
   savingProjectEdit.value = true;
   try {
     const updated = await updateProject(
@@ -662,6 +675,7 @@ const saveProjectEdit = async () => {
       {
         name: editProjectForm.value.name.trim(),
         logoUrl: editProjectForm.value.logoUrl.trim() || null,
+        batchHistoryLockDays: Math.floor(editProjectForm.value.batchHistoryLockDays),
         ceScoringPolicy: editProjectForm.value.ceScoringPolicy,
       },
     );
@@ -1158,6 +1172,23 @@ onMounted(async () => {
             Weighted (independent CE scores)
           </option>
         </select>
+        <label class="msg-muted" for="project-batch-lock-days"
+          >Batch Lock Days</label
+        >
+        <input
+          id="project-batch-lock-days"
+          v-model.number="projectForm.batchHistoryLockDays"
+          class="input"
+          type="number"
+          min="1"
+          max="365"
+          step="1"
+          inputmode="numeric"
+          @keydown="
+            (e) =>
+              ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
+          "
+        />
         <div class="modal-actions">
           <button class="btn-ghost" @click="showProjectModal = false">
             Cancel
@@ -1613,6 +1644,23 @@ onMounted(async () => {
             Weighted (independent CE scores)
           </option>
         </select>
+        <label class="msg-muted" for="edit-project-batch-lock-days"
+          >Batch Lock Days</label
+        >
+        <input
+          id="edit-project-batch-lock-days"
+          v-model.number="editProjectForm.batchHistoryLockDays"
+          class="input"
+          type="number"
+          min="1"
+          max="365"
+          step="1"
+          inputmode="numeric"
+          @keydown="
+            (e) =>
+              ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
+          "
+        />
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditProjectModal = false">
             Cancel

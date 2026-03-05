@@ -10,6 +10,7 @@ import {
   batches,
   globalProviderSettings,
   jobAnalyses,
+  jobScoreEditHistory,
   jobEvaluationRows,
   jobs,
   jobSegments,
@@ -24,6 +25,7 @@ import {
 } from "../../drizzle/schema.js";
 import {
   assertProjectAccess,
+  assertSystemPermission,
   assertTenantAccess,
   listAccessibleProjects,
   listAccessibleTenants,
@@ -46,6 +48,7 @@ const CreateProjectSchema = z.object({
   logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().default(true),
   supportsOutbound: z.boolean().default(false),
+  batchHistoryLockDays: z.coerce.number().int().min(1).max(365).default(2),
   ceScoringPolicy: z
     .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
     .default("strict_zero_all_ce_if_any_fail"),
@@ -56,6 +59,7 @@ const UpdateProjectSchema = z.object({
   logoUrl: z.string().trim().min(1).nullable().optional(),
   supportsInbound: z.boolean().optional(),
   supportsOutbound: z.boolean().optional(),
+  batchHistoryLockDays: z.coerce.number().int().min(1).max(365).optional(),
   ceScoringPolicy: z
     .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
     .optional(),
@@ -87,6 +91,7 @@ const deleteProjectCascade = async (projectId: string) => {
   const jobIds = projectJobs.map((job) => job.id);
 
   if (jobIds.length) {
+    await db.delete(jobScoreEditHistory).where(inArray(jobScoreEditHistory.jobId, jobIds));
     await db.delete(jobEvaluationRows).where(inArray(jobEvaluationRows.jobId, jobIds));
     await db.delete(jobSegments).where(inArray(jobSegments.jobId, jobIds));
     await db.delete(jobTranscripts).where(inArray(jobTranscripts.jobId, jobIds));
@@ -285,6 +290,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           logoUrl: payload.logoUrl ?? null,
           supportsInbound: payload.supportsInbound,
           supportsOutbound: payload.supportsOutbound,
+          batchHistoryLockDays: payload.batchHistoryLockDays,
           ceScoringPolicy: payload.ceScoringPolicy,
         })
         .returning();
@@ -331,6 +337,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           ...(payload.supportsOutbound !== undefined
             ? { supportsOutbound: payload.supportsOutbound }
             : {}),
+          ...(payload.batchHistoryLockDays !== undefined
+            ? { batchHistoryLockDays: payload.batchHistoryLockDays }
+            : {}),
           ...(payload.ceScoringPolicy !== undefined
             ? { ceScoringPolicy: payload.ceScoringPolicy }
             : {}),
@@ -370,7 +379,8 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.get("/settings/global", { preHandler: app.authenticate }, async () => {
+  app.get("/settings/global", { preHandler: app.authenticate }, async (request) => {
+    await assertSystemPermission((request.user as any).sub, "settings:view");
     const settings = await db.query.globalProviderSettings.findFirst({
       orderBy: (t, { desc }) => [desc(t.updatedAt)],
     });
@@ -383,6 +393,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.put("/settings/global", { preHandler: app.authenticate }, async (request) => {
+    await assertSystemPermission((request.user as any).sub, "system:manage");
     const payload = GlobalSettingsSchema.parse(request.body);
     const existing = await db.query.globalProviderSettings.findFirst({
       orderBy: (t, { desc }) => [desc(t.updatedAt)],

@@ -64,6 +64,18 @@ export const getAuthBootstrapStatus = async () => {
   return parse<{ canRegister: boolean }>(response);
 };
 
+export type AuthMe = {
+  id: string;
+  email: string;
+  isRestricted: boolean;
+  permissions: string[];
+};
+
+export const getAuthMe = async () => {
+  const response = await fetch(`${API_BASE}/auth/me`, { headers: withAuth() });
+  return parse<AuthMe>(response);
+};
+
 export type Tenant = {
   id: string;
   name: string;
@@ -78,6 +90,7 @@ export type Project = {
   logoUrl?: string | null;
   supportsInbound: boolean;
   supportsOutbound: boolean;
+  batchHistoryLockDays: number;
   ceScoringPolicy:
     | "strict_zero_all_ce_if_any_fail"
     | "weighted_ce_independent";
@@ -91,9 +104,63 @@ export type BatchHistoryItem = {
   status: string;
   createdAt: string;
   updatedAt: string;
+  lockDays?: number;
+  lockAt?: string;
+  isLocked?: boolean;
   totalJobs: number;
   completedJobs: number;
   failedJobs: number;
+};
+
+export type JobEvaluationTableRow = {
+  id: string;
+  row_index: number;
+  area: string;
+  parameter: string;
+  description: string;
+  evidence_timestamp: string;
+  note: string;
+  score: number;
+  max_score: number;
+  is_edited?: boolean;
+};
+
+export type JobDetail = {
+  id: string;
+  batchId: string;
+  tenantId: string;
+  projectId: string;
+  matrixVersionId: string;
+  callType: "inbound" | "outbound";
+  status: string;
+  fileName: string;
+  transcript: string | null;
+  segments: Array<Record<string, unknown>>;
+  analysis: null | {
+    summary: string;
+    routing: string;
+    red_flags: string | null;
+    evaluation_table: JobEvaluationTableRow[];
+  };
+  createdAt: string;
+  updatedAt: string;
+  errorMessage?: string | null;
+};
+
+export type JobScoreHistoryEntry = {
+  id: string;
+  jobId: string;
+  rowIndex: number;
+  area: string;
+  parameter: string;
+  oldScore: number;
+  newScore: number;
+  maxScore: number;
+  reasonNote: string;
+  changeSource: "manual" | "ce_strict_auto";
+  createdAt: string;
+  editedBy: string;
+  editedByEmail: string | null;
 };
 
 export type MatrixCallType = "inbound" | "outbound";
@@ -122,14 +189,15 @@ export type MatrixVersionDetail = MatrixVersion & {
 };
 
 export const AVAILABLE_PERMISSION_KEYS = [
+  "qa.read",
   "tenants:view",
   "tenants:manage",
   "projects:view",
   "projects:manage",
   "matrices:view",
   "matrices:manage",
-  "jobs:view",
   "jobs:manage",
+  "scores:manage",
   "settings:view",
   "settings:manage",
   "users:manage",
@@ -233,6 +301,7 @@ export const createProject = async (
     logoUrl?: string | null;
     supportsInbound: boolean;
     supportsOutbound: boolean;
+    batchHistoryLockDays?: number;
     ceScoringPolicy?:
       | "strict_zero_all_ce_if_any_fail"
       | "weighted_ce_independent";
@@ -254,6 +323,7 @@ export const updateProject = async (
     logoUrl?: string | null;
     supportsInbound?: boolean;
     supportsOutbound?: boolean;
+    batchHistoryLockDays?: number;
     ceScoringPolicy?:
       | "strict_zero_all_ce_if_any_fail"
       | "weighted_ce_independent";
@@ -649,7 +719,33 @@ export const getJob = async (jobId: string) => {
   const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
     headers: withAuth(),
   });
-  return parse<any>(response);
+  return parse<JobDetail>(response);
+};
+
+export const updateJobScores = async (
+  jobId: string,
+  payload: {
+    edits: Array<{ rowId: string; score: number; note: string }>;
+  },
+) => {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/scores`, {
+    method: "PATCH",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  return parse<{
+    ok: boolean;
+    totalScore: number;
+    updatedRows: number;
+    strictAutoAdjustedRows: number;
+  }>(response);
+};
+
+export const listJobScoreHistory = async (jobId: string) => {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/score-history`, {
+    headers: withAuth(),
+  });
+  return parse<JobScoreHistoryEntry[]>(response);
 };
 
 export const getJobAudioUrl = (jobId: string) => {

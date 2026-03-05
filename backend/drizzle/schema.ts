@@ -1,6 +1,7 @@
 import {
   boolean,
   foreignKey,
+  index,
   integer,
   jsonb,
   pgEnum,
@@ -32,6 +33,10 @@ export const statusEnum = pgEnum("job_status", [
   "analyzing",
   "completed",
   "failed",
+]);
+export const jobScoreEditChangeSourceEnum = pgEnum("job_score_edit_change_source", [
+  "manual",
+  "ce_strict_auto",
 ]);
 
 export const users = pgTable("users", {
@@ -101,6 +106,7 @@ export const projects = pgTable(
     ceScoringPolicy: ceScoringPolicyEnum("ce_scoring_policy")
       .default("strict_zero_all_ce_if_any_fail")
       .notNull(),
+    batchHistoryLockDays: integer("batch_history_lock_days").default(2).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -272,3 +278,25 @@ export const jobEvaluationRows = pgTable("job_evaluation_rows", {
   score: integer("score").notNull(),
   maxScore: integer("max_score").notNull(),
 });
+
+export const jobScoreEditHistory = pgTable(
+  "job_score_edit_history",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    jobId: uuid("job_id").notNull().references(() => jobs.id),
+    jobEvaluationRowId: uuid("job_evaluation_row_id")
+      .notNull()
+      .references(() => jobEvaluationRows.id),
+    rowIndex: integer("row_index").notNull(),
+    area: text("area").notNull(),
+    parameter: text("parameter").notNull(),
+    oldScore: integer("old_score").notNull(),
+    newScore: integer("new_score").notNull(),
+    maxScore: integer("max_score").notNull(),
+    reasonNote: text("reason_note").notNull(),
+    changeSource: jobScoreEditChangeSourceEnum("change_source").notNull(),
+    editedBy: uuid("edited_by").notNull().references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("job_score_edit_history_job_created_idx").on(t.jobId, t.createdAt)],
+);

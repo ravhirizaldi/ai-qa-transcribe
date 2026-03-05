@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { FastifyPluginAsync } from "fastify";
 import { basename, extname } from "node:path";
@@ -7,21 +7,46 @@ import { db } from "../db.js";
 import {
   batches,
   jobAnalyses,
+  jobScoreEditHistory,
   jobEvaluationRows,
   jobs,
   jobSegments,
   jobTranscripts,
   projects,
+  users,
 } from "../../drizzle/schema.js";
 import {
   assertProjectAccess,
   assertProjectPermission,
   getActiveMatrixVersion,
+  isSuperAdminUser,
 } from "../repos/access.js";
 import { deleteUploadFile, saveUpload } from "../storage.js";
 import { boss, QUEUES } from "../queue.js";
 type CallType = "inbound" | "outbound";
+
 const ACTIVE_JOB_STATUSES = ["queued", "uploading", "transcribing", "analyzing"] as const;
+const DEFAULT_BATCH_HISTORY_LOCK_DAYS = 2;
+const BATCH_HISTORY_LOCKED_MESSAGE =
+  "Batch is locked (view-only) after the configured lock period.";
+const STRICT_CE_POLICY = "strict_zero_all_ce_if_any_fail" as const;
+const SCORE_EDIT_SOURCE_MANUAL = "manual" as const;
+const SCORE_EDIT_SOURCE_STRICT_AUTO = "ce_strict_auto" as const;
+
+const normalizeBatchHistoryLockDays = (value: number | null | undefined) => {
+  const days = Number(value ?? DEFAULT_BATCH_HISTORY_LOCK_DAYS);
+  if (!Number.isFinite(days)) return DEFAULT_BATCH_HISTORY_LOCK_DAYS;
+  return Math.max(1, Math.floor(days));
+};
+
+const getBatchLockMeta = (createdAt: Date, lockDays: number) => {
+  const lockAt = new Date(createdAt.getTime() + lockDays * 24 * 60 * 60 * 1000);
+  return {
+    lockDays,
+    lockAt,
+    isLocked: Date.now() >= lockAt.getTime(),
+  };
+};
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
   const hasActiveJobsInBatch = async (batchId: string) => {
@@ -42,7 +67,8 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       if (!project) {
         return reply.code(404).send({ message: "Project not found" });
       }
-      await assertProjectPermission(project.tenantId, project.id, userId, "jobs:view");
+      await assertProjectPermission(project.tenantId, project.id, userId, "qa.read");
+      const lockDays = normalizeBatchHistoryLockDays(project.batchHistoryLockDays);
 
       const projectBatches = await db.query.batches.findMany({
         where: eq(batches.projectId, params.projectId),
@@ -69,6 +95,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
           status: batch.status,
           createdAt: batch.createdAt,
           updatedAt: batch.updatedAt,
+          ...getBatchLockMeta(batch.createdAt, lockDays),
           totalJobs: batchJobs.length,
           completedJobs,
           failedJobs,
@@ -235,6 +262,13 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!supportsCallType) {
       return reply.code(400).send({ message: "Project does not support selected call type" });
     }
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project.batchHistoryLockDays),
+    );
+    if (lockMeta.isLocked) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
 
     const parts = request.parts();
     for await (const part of parts) {
@@ -300,6 +334,17 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ message: "Batch not found" });
     }
     await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
+    if (lockMeta.isLocked) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
 
     const queuedJobs = await db.query.jobs.findMany({
       where: and(eq(jobs.batchId, batch.id), eq(jobs.status, "queued")),
@@ -327,12 +372,28 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
   app.delete("/batches/:batchId", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
+    const userId = (request.user as any).sub as string;
     const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
     if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
+    const isSuperAdmin = await isSuperAdminUser(userId);
 
-    await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
+    if (lockMeta.isLocked && !isSuperAdmin) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
+
+    if (!lockMeta.isLocked || !isSuperAdmin) {
+      await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:manage");
+    }
 
     const batchJobs = await db.query.jobs.findMany({
       where: eq(jobs.batchId, batch.id),
@@ -356,6 +417,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         await deleteUploadFile(job.filePath);
       }
 
+      await db.delete(jobScoreEditHistory).where(inArray(jobScoreEditHistory.jobId, jobIds));
       await db.delete(jobEvaluationRows).where(inArray(jobEvaluationRows.jobId, jobIds));
       await db.delete(jobAnalyses).where(inArray(jobAnalyses.jobId, jobIds));
       await db.delete(jobSegments).where(inArray(jobSegments.jobId, jobIds));
@@ -375,7 +437,15 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
-    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:view");
+    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "qa.read");
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
 
     const batchJobs = await db.query.jobs.findMany({
       where: eq(jobs.batchId, params.batchId),
@@ -390,6 +460,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       status: batch.status,
       createdAt: batch.createdAt,
       updatedAt: batch.updatedAt,
+      ...lockMeta,
       jobs: batchJobs.map((j) => ({
         id: j.id,
         status: j.status,
@@ -408,7 +479,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!batch) {
       return reply.code(404).send({ message: "Batch not found" });
     }
-    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:view");
+    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "qa.read");
 
     const list = await db.query.jobs.findMany({
       where: eq(jobs.batchId, query.batchId),
@@ -426,7 +497,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     if (!job) {
       return reply.code(404).send({ message: "Job not found" });
     }
-    await assertProjectPermission(job.tenantId, job.projectId, userId, "jobs:view");
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "qa.read");
     const batch = await db.query.batches.findFirst({
       where: eq(batches.id, job.batchId),
       columns: { id: true, userId: true },
@@ -444,6 +515,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         orderBy: (t, { asc }) => [asc(t.rowIndex)],
       }),
     ]);
+    const scoreEdits = await db.query.jobScoreEditHistory.findMany({
+      where: eq(jobScoreEditHistory.jobId, job.id),
+      columns: { jobEvaluationRowId: true },
+    });
+    const editedRowIds = new Set(scoreEdits.map((item) => item.jobEvaluationRowId));
 
     return {
       id: job.id,
@@ -462,6 +538,8 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
             routing: analysis.routing,
             red_flags: analysis.redFlags,
             evaluation_table: rows.map((row) => ({
+              id: row.id,
+              row_index: row.rowIndex,
               area: row.area,
               parameter: row.parameter,
               description: row.description,
@@ -469,6 +547,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
               note: row.note,
               score: row.score,
               max_score: row.maxScore,
+              is_edited: editedRowIds.has(row.id),
             })),
           }
         : null,
@@ -476,6 +555,240 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       updatedAt: job.updatedAt,
       errorMessage: job.errorMessage,
     };
+  });
+
+  app.patch("/jobs/:jobId/scores", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        edits: z
+          .array(
+            z.object({
+              rowId: z.string().uuid(),
+              score: z.number().int(),
+              note: z.string(),
+            }),
+          )
+          .min(1),
+      })
+      .parse(request.body);
+
+    const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
+    if (!job) {
+      return reply.code(404).send({ message: "Job not found" });
+    }
+
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "scores:manage");
+    if (job.status !== "completed") {
+      return reply.code(409).send({ message: "Score can only be edited for completed recording" });
+    }
+
+    const batch = await db.query.batches.findFirst({
+      where: eq(batches.id, job.batchId),
+      columns: { id: true, createdAt: true, projectId: true },
+    });
+    if (!batch) {
+      return reply.code(404).send({ message: "Batch not found" });
+    }
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true, ceScoringPolicy: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
+    if (lockMeta.isLocked) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
+
+    const [analysis, rows] = await Promise.all([
+      db.query.jobAnalyses.findFirst({ where: eq(jobAnalyses.jobId, job.id) }),
+      db.query.jobEvaluationRows.findMany({
+        where: eq(jobEvaluationRows.jobId, job.id),
+        orderBy: (t, { asc }) => [asc(t.rowIndex)],
+      }),
+    ]);
+    if (!analysis || !rows.length) {
+      return reply.code(409).send({ message: "Scorecard not available for this recording" });
+    }
+
+    const rowsById = new Map(rows.map((row) => [row.id, { ...row }]));
+    const seenRowIds = new Set<string>();
+    const manualEntries: Array<{
+      jobEvaluationRowId: string;
+      rowIndex: number;
+      area: string;
+      parameter: string;
+      oldScore: number;
+      newScore: number;
+      maxScore: number;
+      reasonNote: string;
+      changeSource: "manual" | "ce_strict_auto";
+    }> = [];
+
+    for (const edit of body.edits) {
+      if (seenRowIds.has(edit.rowId)) {
+        return reply.code(400).send({ message: "Duplicate score edit row detected" });
+      }
+      seenRowIds.add(edit.rowId);
+
+      const row = rowsById.get(edit.rowId);
+      if (!row) {
+        return reply.code(400).send({ message: `Invalid rowId: ${edit.rowId}` });
+      }
+
+      const note = String(edit.note || "").trim();
+      if (!note) {
+        return reply.code(400).send({ message: "Each edited row requires a non-empty note" });
+      }
+      const nextScore = Number(edit.score);
+      if (!Number.isFinite(nextScore) || (nextScore !== 0 && nextScore !== row.maxScore)) {
+        return reply.code(400).send({
+          message: `Score for row "${row.area}" must be either 0 or ${row.maxScore}`,
+        });
+      }
+      if (nextScore === row.score) {
+        continue;
+      }
+
+      manualEntries.push({
+        jobEvaluationRowId: row.id,
+        rowIndex: row.rowIndex,
+        area: row.area,
+        parameter: row.parameter,
+        oldScore: row.score,
+        newScore: nextScore,
+        maxScore: row.maxScore,
+        reasonNote: note,
+        changeSource: SCORE_EDIT_SOURCE_MANUAL,
+      });
+      row.score = nextScore;
+    }
+
+    const strictAutoEntries: typeof manualEntries = [];
+    if (project?.ceScoringPolicy === STRICT_CE_POLICY) {
+      const hasCeDefect = [...rowsById.values()].some((row) => {
+        if (String(row.parameter || "").toUpperCase() !== "CE") return false;
+        return row.score < row.maxScore;
+      });
+      for (const row of rowsById.values()) {
+        if (String(row.parameter || "").toUpperCase() !== "CE") continue;
+        const strictScore = hasCeDefect ? 0 : row.maxScore;
+        if (row.score === strictScore) continue;
+        strictAutoEntries.push({
+          jobEvaluationRowId: row.id,
+          rowIndex: row.rowIndex,
+          area: row.area,
+          parameter: row.parameter,
+          oldScore: row.score,
+          newScore: strictScore,
+          maxScore: row.maxScore,
+          reasonNote: "Auto-adjusted by CE Strict policy after manual edit",
+          changeSource: SCORE_EDIT_SOURCE_STRICT_AUTO,
+        });
+        row.score = strictScore;
+      }
+    }
+
+    const updates = [...rowsById.values()].filter((row) => {
+      const original = rows.find((initial) => initial.id === row.id);
+      return Boolean(original && original.score !== row.score);
+    });
+    const totalScore = [...rowsById.values()].reduce(
+      (sum, row) => sum + Number(row.score || 0),
+      0,
+    );
+    const rawJson = analysis.rawJson as any;
+    const nextRawJson =
+      rawJson && typeof rawJson === "object"
+        ? JSON.parse(JSON.stringify(rawJson))
+        : {};
+    if (Array.isArray(nextRawJson?.qa_scorecard?.evaluation_table)) {
+      for (let idx = 0; idx < nextRawJson.qa_scorecard.evaluation_table.length; idx += 1) {
+        const entry = nextRawJson.qa_scorecard.evaluation_table[idx];
+        const rowIndex =
+          typeof entry?.row_index === "number" ? Number(entry.row_index) : idx;
+        const updated = [...rowsById.values()].find((row) => row.rowIndex === rowIndex);
+        if (updated) {
+          entry.score = updated.score;
+          entry.max_score = updated.maxScore;
+        }
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      for (const row of updates) {
+        await tx
+          .update(jobEvaluationRows)
+          .set({ score: row.score })
+          .where(eq(jobEvaluationRows.id, row.id));
+      }
+
+      await tx
+        .update(jobAnalyses)
+        .set({ totalScore, rawJson: nextRawJson })
+        .where(eq(jobAnalyses.jobId, job.id));
+
+      const historyValues = [...manualEntries, ...strictAutoEntries].map((entry) => ({
+        jobId: job.id,
+        jobEvaluationRowId: entry.jobEvaluationRowId,
+        rowIndex: entry.rowIndex,
+        area: entry.area,
+        parameter: entry.parameter,
+        oldScore: entry.oldScore,
+        newScore: entry.newScore,
+        maxScore: entry.maxScore,
+        reasonNote: entry.reasonNote,
+        changeSource: entry.changeSource,
+        editedBy: userId,
+      }));
+      if (historyValues.length) {
+        await tx.insert(jobScoreEditHistory).values(historyValues);
+      }
+    });
+
+    return {
+      ok: true,
+      totalScore,
+      updatedRows: updates.length,
+      strictAutoAdjustedRows: strictAutoEntries.length,
+    };
+  });
+
+  app.get("/jobs/:jobId/score-history", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
+
+    const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
+    if (!job) {
+      return reply.code(404).send({ message: "Job not found" });
+    }
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "scores:manage");
+
+    const historyRows = await db
+      .select({
+        id: jobScoreEditHistory.id,
+        jobId: jobScoreEditHistory.jobId,
+        rowIndex: jobScoreEditHistory.rowIndex,
+        area: jobScoreEditHistory.area,
+        parameter: jobScoreEditHistory.parameter,
+        oldScore: jobScoreEditHistory.oldScore,
+        newScore: jobScoreEditHistory.newScore,
+        maxScore: jobScoreEditHistory.maxScore,
+        reasonNote: jobScoreEditHistory.reasonNote,
+        changeSource: jobScoreEditHistory.changeSource,
+        createdAt: jobScoreEditHistory.createdAt,
+        editedBy: jobScoreEditHistory.editedBy,
+        editedByEmail: users.email,
+      })
+      .from(jobScoreEditHistory)
+      .leftJoin(users, eq(jobScoreEditHistory.editedBy, users.id))
+      .where(eq(jobScoreEditHistory.jobId, job.id))
+      .orderBy(desc(jobScoreEditHistory.createdAt));
+
+    return historyRows;
   });
 
   app.get("/jobs/:jobId/audio", async (request: any, reply) => {
@@ -503,7 +816,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ message: "Job not found" });
     }
 
-    await assertProjectPermission(job.tenantId, job.projectId, userId, "jobs:view");
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "qa.read");
     const batch = await db.query.batches.findFirst({
       where: eq(batches.id, job.batchId),
       columns: { id: true, userId: true },
@@ -539,6 +852,24 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await assertProjectPermission(job.tenantId, job.projectId, (request.user as any).sub, "jobs:manage");
+    const batch = await db.query.batches.findFirst({
+      where: eq(batches.id, job.batchId),
+      columns: { id: true, createdAt: true, projectId: true },
+    });
+    if (!batch) {
+      return reply.code(404).send({ message: "Batch not found" });
+    }
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
+    if (lockMeta.isLocked) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
 
     if (
       ACTIVE_JOB_STATUSES.includes(
@@ -551,6 +882,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await deleteUploadFile(job.filePath);
+    await db.delete(jobScoreEditHistory).where(eq(jobScoreEditHistory.jobId, job.id));
     await db.delete(jobEvaluationRows).where(eq(jobEvaluationRows.jobId, job.id));
     await db.delete(jobAnalyses).where(eq(jobAnalyses.jobId, job.id));
     await db.delete(jobSegments).where(eq(jobSegments.jobId, job.id));
@@ -569,11 +901,30 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await assertProjectPermission(job.tenantId, job.projectId, (request.user as any).sub, "jobs:manage");
+    const batch = await db.query.batches.findFirst({
+      where: eq(batches.id, job.batchId),
+      columns: { id: true, createdAt: true, projectId: true },
+    });
+    if (!batch) {
+      return reply.code(404).send({ message: "Batch not found" });
+    }
+    const project = await db.query.projects.findFirst({
+      where: eq(projects.id, batch.projectId),
+      columns: { batchHistoryLockDays: true },
+    });
+    const lockMeta = getBatchLockMeta(
+      batch.createdAt,
+      normalizeBatchHistoryLockDays(project?.batchHistoryLockDays),
+    );
+    if (lockMeta.isLocked) {
+      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+    }
 
     if (job.status !== "failed") {
       return reply.code(409).send({ message: "Only failed recording can be retried" });
     }
 
+    await db.delete(jobScoreEditHistory).where(eq(jobScoreEditHistory.jobId, job.id));
     await db.delete(jobEvaluationRows).where(eq(jobEvaluationRows.jobId, job.id));
     await db.delete(jobAnalyses).where(eq(jobAnalyses.jobId, job.id));
     await db.delete(jobSegments).where(eq(jobSegments.jobId, job.id));

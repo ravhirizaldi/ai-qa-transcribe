@@ -2,7 +2,14 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
-import { Image as ImageIcon } from "lucide-vue-next";
+import {
+  FileText,
+  History,
+  Image as ImageIcon,
+  Lock,
+  SlidersHorizontal,
+  Table2,
+} from "lucide-vue-next";
 import AudioUploader from "../components/AudioUploader.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
 import TranscriptViewer from "../components/TranscriptViewer.vue";
@@ -15,15 +22,20 @@ import {
   getBatch,
   getJob,
   getJobAudioUrl,
+  listJobScoreHistory,
   getActiveMatrixVersion,
   listProjectBatches,
   listProjects,
   listTenants,
   retryJob,
+  updateJobScores,
   uploadBatchFiles,
+  getAuthMe,
   subscribeBatch,
   subscribeJob,
   type BatchHistoryItem,
+  type JobDetail,
+  type JobScoreHistoryEntry,
   type Project,
   type Tenant,
 } from "../services/backendApi";
@@ -52,7 +64,7 @@ const tenantPreviewStats = ref<
 const loadingTenantPreviewStats = ref(false);
 const batchDetails = ref<any | null>(null);
 const selectedJobId = ref("");
-const selectedJobDetail = ref<any | null>(null);
+const selectedJobDetail = ref<JobDetail | null>(null);
 const loadingJobDetail = ref(false);
 const selectedJobAudioUrl = ref<string | null>(null);
 const resultTranscriptRef = ref<{ seekTo: (seconds: number) => void } | null>(null);
@@ -77,6 +89,17 @@ const hasMatrixForProject = ref(true);
 const matrixMessage = ref("");
 const requestingAnalyze = ref(false);
 const lockedBatchId = ref("");
+const canManageJobs = ref(false);
+const canManageScores = ref(false);
+const canViewMatrices = ref(false);
+const isSuperAdmin = ref(false);
+const resultModalTab = ref<"result" | "history">("result");
+const resultDetailTab = ref<"matrix" | "manual">("matrix");
+const scoreEdits = ref<Record<string, { score: number; note: string }>>({});
+const savingScoreEdits = ref(false);
+const scoreHistory = ref<JobScoreHistoryEntry[]>([]);
+const loadingScoreHistory = ref(false);
+const scoreHistoryLoadedForJobId = ref("");
 const showConfirmModal = ref(false);
 const confirmTitle = ref("");
 const confirmMessage = ref("");
@@ -154,6 +177,14 @@ const selectedProject = computed(
     projects.value.find((project) => project.id === selectedProjectId.value) ||
     null,
 );
+const showProjectSelector = computed(() => projects.value.length !== 1);
+const workspaceTitle = computed(() => {
+  const tenantName = selectedTenant.value?.name || "Tenant Workspace";
+  if (!showProjectSelector.value && selectedProject.value?.name) {
+    return `${tenantName} - ${selectedProject.value.name}`;
+  }
+  return tenantName;
+});
 const selectedBatchJobs = computed(
   () =>
     (batchDetails.value?.jobs || []) as Array<{
@@ -193,6 +224,31 @@ const transcriptSegments = computed(() => {
     words: seg.wordsJson || [],
   }));
 });
+const resultScoreRows = computed(
+  () => selectedJobDetail.value?.analysis?.evaluation_table || [],
+);
+const hasScoreChanges = computed(() =>
+  resultScoreRows.value.some((row) => {
+    const draft = scoreEdits.value[row.id];
+    return draft && Number(draft.score) !== Number(row.score);
+  }),
+);
+const hasMissingScoreNotes = computed(() =>
+  resultScoreRows.value.some((row) => {
+    const draft = scoreEdits.value[row.id];
+    if (!draft || Number(draft.score) === Number(row.score)) return false;
+    return !String(draft.note || "").trim();
+  }),
+);
+const canSubmitScoreEdits = computed(
+  () =>
+    canManageScores.value &&
+    !isBatchViewOnlyLocked.value &&
+    !savingScoreEdits.value &&
+    selectedJobDetail.value?.status === "completed" &&
+    hasScoreChanges.value &&
+    !hasMissingScoreNotes.value,
+);
 const batchDashboard = computed(() => {
   const total = selectedBatchJobs.value.length;
   const completed = selectedBatchJobs.value.filter(
@@ -212,9 +268,25 @@ const batchDashboard = computed(() => {
 });
 
 const ceNceScores = computed(() => {
-  const nceParametersCount = activeMatrixRows.value.filter(
+  const matrixNceParametersCount = activeMatrixRows.value.filter(
     (r) => String(r.parameter || "").toUpperCase() === "NCE",
   ).length;
+  const derivedNceParametersCountFromResults = Math.max(
+    0,
+    ...selectedBatchJobs.value
+      .filter((job) => job.status === "completed")
+      .map((job) => {
+        const detail = jobsWithAnalysis.value[job.id];
+        const table = detail?.analysis?.evaluation_table || [];
+        return table.filter(
+          (row: any) => String(row.parameter || "").toUpperCase() === "NCE",
+        ).length;
+      }),
+  );
+  const nceParametersCount =
+    matrixNceParametersCount > 0
+      ? matrixNceParametersCount
+      : derivedNceParametersCountFromResults;
 
   const totalSamples =
     batchDashboard.value.completed + batchDashboard.value.failed;
@@ -300,10 +372,27 @@ const hasRunningJobs = computed(() =>
 const hasQueuedJobs = computed(() =>
   selectedBatchJobs.value.some((job) => job.status === "queued"),
 );
+const selectedHistoryBatch = computed(
+  () => history.value.find((batch) => batch.id === selectedBatchId.value) || null,
+);
+const isBatchViewOnlyLocked = computed(() =>
+  Boolean(selectedHistoryBatch.value?.isLocked ?? batchDetails.value?.isLocked),
+);
+const selectedBatchLockAt = computed(
+  () => selectedHistoryBatch.value?.lockAt || batchDetails.value?.lockAt || "",
+);
+const selectedBatchLockDays = computed(() =>
+  Number(
+    selectedHistoryBatch.value?.lockDays ||
+      selectedProject.value?.batchHistoryLockDays ||
+      2,
+  ),
+);
 const isBatchLocked = computed(() => {
   if (!selectedBatchId.value) return true;
   const lockApplies = lockedBatchId.value === selectedBatchId.value;
   return (
+    isBatchViewOnlyLocked.value ||
     uploading.value ||
     requestingAnalyze.value ||
     hasRunningJobs.value ||
@@ -355,27 +444,39 @@ const getBatchName = (batch: BatchHistoryItem) => {
 };
 
 const canDeleteBatch = (batch: BatchHistoryItem) => {
-  return (
+  const readyForDelete =
     batch.totalJobs === 0 ||
     (batch.totalJobs > 0 &&
-      batch.completedJobs + batch.failedJobs === batch.totalJobs)
-  );
+      batch.completedJobs + batch.failedJobs === batch.totalJobs);
+  if (!readyForDelete) return false;
+  if (batch.isLocked && !isSuperAdmin.value) return false;
+  return true;
 };
 
 const syncRoute = async () => {
   const currentTenant = normalizeUuidParam(route.query.tenant);
   const currentProject = normalizeUuidParam(route.query.project);
+  const currentBatch = normalizeUuidParam(route.query.batch);
 
   const nextTenant = showWorkspace.value ? selectedTenantId.value || "" : "";
   const nextProject = showWorkspace.value ? selectedProjectId.value || "" : "";
+  const nextBatch =
+    showWorkspace.value && selectedProjectId.value ? selectedBatchId.value || "" : "";
 
-  if (currentTenant === nextTenant && currentProject === nextProject) return;
+  if (
+    currentTenant === nextTenant &&
+    currentProject === nextProject &&
+    currentBatch === nextBatch
+  ) {
+    return;
+  }
 
   await router.replace({
     path: "/batch",
     query: {
       tenant: nextTenant || undefined,
       project: nextProject || undefined,
+      batch: nextBatch || undefined,
     },
   });
 };
@@ -422,6 +523,14 @@ const checkMatrix = async () => {
     return;
   }
 
+  // Read-only QA users without matrix permission should still access history/results
+  // without a blocking warning banner.
+  if (!canViewMatrices.value && !canManageJobs.value) {
+    hasMatrixForProject.value = true;
+    matrixMessage.value = "";
+    return;
+  }
+
   checkingMatrix.value = true;
   try {
     const activeVersion = await getActiveMatrixVersion(
@@ -450,7 +559,7 @@ const loadHistory = async (opts?: {
     batchDetails.value = null;
   }
 
-  if (!selectedProjectId.value || !hasMatrixForProject.value) return;
+  if (!selectedProjectId.value) return;
 
   if (!opts?.silent) {
     loadingHistory.value = true;
@@ -617,6 +726,7 @@ const startRealtime = () => {
 const openTenantWorkspace = async (
   tenantId: string,
   preferredProjectId?: string,
+  preferredBatchId?: string,
 ) => {
   selectedTenantId.value = tenantId;
   session.setTenantId(tenantId);
@@ -633,6 +743,12 @@ const openTenantWorkspace = async (
 
   await checkMatrix();
   await loadHistory();
+  if (preferredBatchId) {
+    const existing = history.value.find((batch) => batch.id === preferredBatchId);
+    if (existing) {
+      selectedBatchId.value = existing.id;
+    }
+  }
   await syncRoute();
 };
 
@@ -640,6 +756,7 @@ const closeWorkspace = async () => {
   showWorkspace.value = false;
   showResultModal.value = false;
   selectedJobAudioUrl.value = null;
+  resetResultModalScoreState();
   selectedProjectId.value = "";
   projects.value = [];
   history.value = [];
@@ -658,6 +775,10 @@ const selectWorkspaceProject = async (projectId: string) => {
 };
 
 const createBatchMetadata = async () => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to create batches.");
+    return;
+  }
   if (!selectedTenantId.value || !selectedProjectId.value) {
     toast.error("Select tenant and project first.");
     return;
@@ -704,8 +825,116 @@ const closeCreateBatchModal = () => {
   showCreateBatchModal.value = false;
 };
 
+const resetResultModalScoreState = () => {
+  scoreEdits.value = {};
+  scoreHistory.value = [];
+  scoreHistoryLoadedForJobId.value = "";
+  resultModalTab.value = "result";
+  resultDetailTab.value = "matrix";
+};
+
+const hydrateScoreEditsFromDetail = () => {
+  const rows = selectedJobDetail.value?.analysis?.evaluation_table || [];
+  const next: Record<string, { score: number; note: string }> = {};
+  for (const row of rows) {
+    next[row.id] = { score: Number(row.score ?? 0), note: "" };
+  }
+  scoreEdits.value = next;
+};
+
+const setRowDraftScore = (rowId: string, score: number) => {
+  const current = scoreEdits.value[rowId] || { score, note: "" };
+  scoreEdits.value = {
+    ...scoreEdits.value,
+    [rowId]: { score, note: current.note || "" },
+  };
+};
+
+const setRowDraftNote = (rowId: string, note: string) => {
+  const current = scoreEdits.value[rowId] || { score: 0, note: "" };
+  scoreEdits.value = {
+    ...scoreEdits.value,
+    [rowId]: { score: current.score, note },
+  };
+};
+
+const loadScoreHistory = async () => {
+  if (!canManageScores.value || !selectedJobId.value) return;
+  if (scoreHistoryLoadedForJobId.value === selectedJobId.value) return;
+  loadingScoreHistory.value = true;
+  try {
+    scoreHistory.value = await listJobScoreHistory(selectedJobId.value);
+    scoreHistoryLoadedForJobId.value = selectedJobId.value;
+  } catch (error) {
+    toast.error(
+      error instanceof Error
+        ? error.message
+        : "Failed to load scoring history",
+    );
+  } finally {
+    loadingScoreHistory.value = false;
+  }
+};
+
+const submitScoreEdits = async () => {
+  if (!selectedJobId.value || !selectedJobDetail.value?.analysis) return;
+  const edits = resultScoreRows.value
+    .map((row) => {
+      const draft = scoreEdits.value[row.id];
+      if (!draft || Number(draft.score) === Number(row.score)) return null;
+      return {
+        rowId: row.id,
+        score: Number(draft.score),
+        note: String(draft.note || "").trim(),
+      };
+    })
+    .filter((item): item is { rowId: string; score: number; note: string } =>
+      Boolean(item),
+    );
+
+  if (!edits.length) {
+    toast.error("No score changes to save.");
+    return;
+  }
+  if (edits.some((edit) => !edit.note)) {
+    toast.error("Each edited row requires a note.");
+    return;
+  }
+
+  savingScoreEdits.value = true;
+  try {
+    const result = await updateJobScores(selectedJobId.value, { edits });
+    toast.success(
+      `Saved ${result.updatedRows} row update(s)${
+        result.strictAutoAdjustedRows
+          ? ` (${result.strictAutoAdjustedRows} CE strict auto-adjusted)`
+          : ""
+      }`,
+    );
+
+    await loadSelectedJobDetail({ silent: true });
+    if (selectedJobDetail.value) {
+      jobsWithAnalysis.value[selectedJobId.value] = selectedJobDetail.value;
+      hydrateScoreEditsFromDetail();
+    }
+    scoreHistoryLoadedForJobId.value = "";
+    if (resultModalTab.value === "history") {
+      await loadScoreHistory();
+    }
+    await loadSelectedBatchDetail({ silent: true });
+    await loadHistory({ silent: true, preserveSelection: true });
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to update scores",
+    );
+  } finally {
+    savingScoreEdits.value = false;
+  }
+};
+
 const openResultForJob = async (jobId: string) => {
   selectedJobId.value = jobId;
+  resetResultModalScoreState();
   await loadSelectedJobDetail();
 
   if (!selectedJobDetail.value) {
@@ -713,12 +942,14 @@ const openResultForJob = async (jobId: string) => {
     return;
   }
 
+  hydrateScoreEditsFromDetail();
   showResultModal.value = true;
   void loadSelectedJobAudio();
 };
 
 const closeResultModal = () => {
   showResultModal.value = false;
+  resetResultModalScoreState();
 };
 
 const openConfirm = (
@@ -833,11 +1064,19 @@ const loadSelectedJobAudio = async () => {
 };
 
 const uploadToSelectedBatch = async (files: File[], analyzeNow: boolean) => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to upload recordings.");
+    return;
+  }
   if (!selectedBatchId.value) {
     toast.error("Create or select a batch first.");
     return;
   }
   if (!files.length) return;
+  if (isBatchViewOnlyLocked.value) {
+    toast.error("This batch is locked and now view-only.");
+    return;
+  }
 
   uploading.value = true;
   try {
@@ -863,7 +1102,15 @@ const onFilesSelected = async (files: File[]) => {
 };
 
 const startAnalyzeQueued = async () => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to run analysis.");
+    return;
+  }
   if (!selectedBatchId.value) return;
+  if (isBatchViewOnlyLocked.value) {
+    toast.error("This batch is locked and now view-only.");
+    return;
+  }
   requestingAnalyze.value = true;
   try {
     const res = await analyzeBatchNow(selectedBatchId.value);
@@ -884,16 +1131,26 @@ const startAnalyzeQueued = async () => {
 };
 
 const canDeleteJob = (job: { status: string }) => {
+  if (isBatchViewOnlyLocked.value) return false;
   return job.status === "completed" || job.status === "failed";
 };
 
 const canRetryJob = (job: { status: string }) => {
+  if (isBatchViewOnlyLocked.value) return false;
   return job.status === "failed";
 };
 
 const deleteJobAction = async (job: { id: string; status: string }) => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to delete recordings.");
+    return;
+  }
   if (!canDeleteJob(job)) {
-    toast.error("Recording can be deleted only after processing is completed.");
+    toast.error(
+      isBatchViewOnlyLocked.value
+        ? "This batch is locked and now view-only."
+        : "Recording can be deleted only after processing is completed.",
+    );
     return;
   }
   openConfirm(
@@ -915,8 +1172,16 @@ const deleteJobAction = async (job: { id: string; status: string }) => {
 };
 
 const retryJobAction = async (job: { id: string; status: string }) => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to retry recordings.");
+    return;
+  }
   if (!canRetryJob(job)) {
-    toast.error("Only failed recordings can be retried.");
+    toast.error(
+      isBatchViewOnlyLocked.value
+        ? "This batch is locked and now view-only."
+        : "Only failed recordings can be retried.",
+    );
     return;
   }
 
@@ -937,8 +1202,16 @@ const retryJobAction = async (job: { id: string; status: string }) => {
 };
 
 const deleteBatchAction = async (batch: BatchHistoryItem) => {
+  if (!canManageJobs.value) {
+    toast.error("You do not have permission to delete batches.");
+    return;
+  }
   if (!canDeleteBatch(batch)) {
-    toast.error("Batch can be deleted only when all recordings are processed.");
+    toast.error(
+      batch.isLocked && !isSuperAdmin.value
+        ? "Locked batch can only be deleted by super admin."
+        : "Batch can be deleted only when all recordings are processed.",
+    );
     return;
   }
   openConfirm(
@@ -967,6 +1240,8 @@ watch(selectedBatchId, async () => {
   jobsCurrentPage.value = 1;
   showResultModal.value = false;
   selectedJobAudioUrl.value = null;
+  resetResultModalScoreState();
+  await syncRoute();
   await loadSelectedBatchDetail();
   startRealtime();
 });
@@ -981,7 +1256,20 @@ watch(selectedJobId, async () => {
   selectedJobAudioUrl.value = null;
   await loadSelectedJobDetail();
   if (showResultModal.value) {
+    hydrateScoreEditsFromDetail();
+    if (resultModalTab.value === "history") {
+      await loadScoreHistory();
+    }
+  }
+  if (showResultModal.value) {
     await loadSelectedJobAudio();
+  }
+});
+
+watch(resultModalTab, async (tab) => {
+  if (!showResultModal.value) return;
+  if (tab === "history") {
+    await loadScoreHistory();
   }
 });
 
@@ -1005,6 +1293,7 @@ watch(
       showWorkspace.value = false;
       showResultModal.value = false;
       selectedJobAudioUrl.value = null;
+      resetResultModalScoreState();
       selectedProjectId.value = "";
       projects.value = [];
       history.value = [];
@@ -1017,18 +1306,45 @@ watch(
 );
 
 onMounted(async () => {
+  try {
+    const me = await getAuthMe();
+    if (!me.isRestricted) {
+      isSuperAdmin.value = true;
+      canManageJobs.value = true;
+      canManageScores.value = true;
+      canViewMatrices.value = true;
+    } else {
+      isSuperAdmin.value = false;
+      const permissions = new Set(me.permissions);
+      canManageJobs.value = permissions.has("jobs:manage");
+      canManageScores.value = permissions.has("scores:manage");
+      canViewMatrices.value =
+        permissions.has("matrices:view") || permissions.has("matrices:manage");
+    }
+  } catch {
+    isSuperAdmin.value = false;
+    canManageJobs.value = false;
+    canManageScores.value = false;
+    canViewMatrices.value = false;
+  }
+
   loadBatchNames();
   batchName.value = defaultBatchName();
   await loadTenants();
 
   const tenantQuery = normalizeUuidParam(route.query.tenant);
   const projectQuery = normalizeUuidParam(route.query.project);
+  const batchQuery = normalizeUuidParam(route.query.batch);
 
   if (
     tenantQuery &&
     tenants.value.some((tenant) => tenant.id === tenantQuery)
   ) {
-    await openTenantWorkspace(tenantQuery, projectQuery || undefined);
+    await openTenantWorkspace(
+      tenantQuery,
+      projectQuery || undefined,
+      batchQuery || undefined,
+    );
     return;
   }
 
@@ -1130,7 +1446,7 @@ onUnmounted(() => {
         <div class="workspace-head">
           <div>
             <p class="workspace-title">
-              {{ selectedTenant?.name || "Tenant Workspace" }}
+              {{ workspaceTitle }}
             </p>
             <p class="workspace-subtitle">
               Build batches, drop recordings, and track QA performance live
@@ -1141,8 +1457,11 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <div class="workspace-body">
-          <aside class="project-panel">
+        <div
+          class="workspace-body"
+          :class="{ 'workspace-body-single-project': !showProjectSelector }"
+        >
+          <aside v-if="showProjectSelector" class="project-panel">
             <div class="project-panel-head">
               <p>Choose Project</p>
             </div>
@@ -1174,16 +1493,20 @@ onUnmounted(() => {
             <div v-else-if="checkingMatrix" class="msg-muted">
               Checking matrix...
             </div>
-            <div v-else-if="!hasMatrixForProject" class="alert-card">
-              <h3>No Matrix Component</h3>
-              <p>{{ matrixMessage }}</p>
-            </div>
             <template v-else>
+              <div v-if="!hasMatrixForProject" class="alert-card">
+                <h3>No Matrix Component</h3>
+                <p>{{ matrixMessage }}</p>
+              </div>
               <div class="qa-layout">
                 <div class="history-panel panel-card">
                   <div class="history-head">
                     <p class="panel-title">Batch Timeline</p>
-                    <button class="btn-primary" @click="openCreateBatchModal">
+                    <button
+                      v-if="canManageJobs"
+                      class="btn-primary"
+                      @click="openCreateBatchModal"
+                    >
                       + New Batch
                     </button>
                   </div>
@@ -1197,22 +1520,33 @@ onUnmounted(() => {
                       class="history-row"
                       :class="{
                         'history-row-active': selectedBatchId === batch.id,
+                        'history-row-locked': batch.isLocked,
                       }"
                     >
                       <button
                         class="history-main"
                         @click="selectedBatchId = batch.id"
                       >
-                        <span class="history-name">{{
-                          getBatchName(batch)
-                        }}</span>
+                        <div class="history-main-head">
+                          <span class="history-name">{{
+                            getBatchName(batch)
+                          }}</span>
+                          <span
+                            v-if="batch.isLocked"
+                            class="history-lock-indicator"
+                            title="Locked (view-only)"
+                            aria-label="Locked (view-only)"
+                          >
+                            <Lock :size="12" aria-hidden="true" />
+                          </span>
+                        </div>
                         <span class="history-meta"
                           >{{ new Date(batch.createdAt).toLocaleString() }} |
                           {{ batch.totalJobs }} files</span
                         >
                       </button>
                       <button
-                        v-if="canDeleteBatch(batch)"
+                        v-if="canManageJobs && canDeleteBatch(batch)"
                         class="btn-danger"
                         @click="deleteBatchAction(batch)"
                       >
@@ -1297,9 +1631,12 @@ onUnmounted(() => {
                         </button>
                         <button
                           class="btn-analyze"
-                          :disabled="!hasQueuedJobs || isBatchLocked"
+                          :disabled="!canManageJobs || !hasQueuedJobs || isBatchLocked"
                           @click="startAnalyzeQueued"
                           :title="
+                            isBatchViewOnlyLocked
+                              ? 'Batch is locked and view-only'
+                              :
                             !hasQueuedJobs
                               ? 'No queued recordings ready'
                               : 'Run QA on queued recordings'
@@ -1312,11 +1649,19 @@ onUnmounted(() => {
                     <p v-if="!selectedBatchId" class="msg-muted">
                       Create or select a batch first.
                     </p>
+                    <p v-else-if="isBatchViewOnlyLocked" class="msg-muted">
+                      Locked after {{ selectedBatchLockDays }} day(s)
+                      <span v-if="selectedBatchLockAt">
+                        (since
+                        {{ new Date(selectedBatchLockAt).toLocaleString() }})
+                      </span>
+                      . View only mode is active.
+                    </p>
                     <div v-else>
                       <AudioUploader
                         :is-processing="uploading"
                         :multiple="true"
-                        :disabled="!selectedBatchId || isBatchLocked"
+                        :disabled="!canManageJobs || !selectedBatchId || isBatchLocked"
                         button-label="Browse Files"
                         @files-selected="onFilesSelected"
                       />
@@ -1359,14 +1704,14 @@ onUnmounted(() => {
                             View Result
                           </button>
                           <button
-                            v-if="canDeleteJob(job)"
+                            v-if="canManageJobs && canDeleteJob(job)"
                             class="btn-danger"
                             @click.stop="deleteJobAction(job)"
                           >
                             Delete
                           </button>
                           <button
-                            v-else-if="canRetryJob(job)"
+                            v-else-if="canManageJobs && canRetryJob(job)"
                             class="btn-ghost"
                             @click.stop="retryJobAction(job)"
                           >
@@ -1458,49 +1803,295 @@ onUnmounted(() => {
                       </button>
                     </div>
 
-                    <div class="result-modal-body">
+                    <div class="result-modal-tabs">
+                      <button
+                        class="result-tab-btn"
+                        :class="{
+                          'result-tab-btn-active': resultModalTab === 'result',
+                        }"
+                        @click="resultModalTab = 'result'"
+                      >
+                        <FileText :size="14" aria-hidden="true" />
+                        Result
+                      </button>
+                      <button
+                        class="result-tab-btn"
+                        :class="{
+                          'result-tab-btn-active': resultModalTab === 'history',
+                        }"
+                        @click="resultModalTab = 'history'"
+                      >
+                        <History :size="14" aria-hidden="true" />
+                        Scoring History
+                      </button>
+                    </div>
+
+                    <div
+                      class="result-modal-body"
+                      :class="{
+                        'result-modal-body-lock-scroll':
+                          resultModalTab === 'result',
+                      }"
+                    >
                       <p v-if="loadingJobDetail" class="msg-muted">
                         Loading result...
                       </p>
-                      <div
-                        v-else-if="
-                          selectedJobDetail?.transcript ||
-                          selectedJobDetail?.analysis
-                        "
-                        class="result-layout"
-                      >
-                        <div class="result-panel">
-                          <div class="result-panel-content-fixed">
-                            <TranscriptViewer
-                              ref="resultTranscriptRef"
-                              :transcript="selectedJobDetail.transcript || ''"
-                              :segments="transcriptSegments"
-                              :file="null"
-                              :audio-url="selectedJobAudioUrl"
-                              :show-resize="false"
-                            />
+                      <template v-else-if="resultModalTab === 'result'">
+                        <div
+                          v-if="
+                            selectedJobDetail?.transcript ||
+                            selectedJobDetail?.analysis
+                          "
+                          class="result-layout"
+                        >
+                          <div class="result-panel">
+                            <div class="result-panel-content-fixed">
+                              <TranscriptViewer
+                                ref="resultTranscriptRef"
+                                :transcript="selectedJobDetail.transcript || ''"
+                                :segments="transcriptSegments"
+                                :file="null"
+                                :audio-url="selectedJobAudioUrl"
+                                :show-resize="false"
+                              />
+                            </div>
+                          </div>
+                          <div class="result-panel">
+                            <div class="result-panel-content-scroll result-panel-content-scroll-no-outer-scroll">
+                              <div class="result-detail-tabs">
+                                <button
+                                  class="result-tab-btn"
+                                  :class="{
+                                    'result-tab-btn-active':
+                                      resultDetailTab === 'matrix',
+                                  }"
+                                  @click="resultDetailTab = 'matrix'"
+                                >
+                                  <Table2 :size="14" aria-hidden="true" />
+                                  Evaluation Matrix
+                                </button>
+                                <button
+                                  class="result-tab-btn"
+                                  :class="{
+                                    'result-tab-btn-active':
+                                      resultDetailTab === 'manual',
+                                  }"
+                                  @click="resultDetailTab = 'manual'"
+                                >
+                                  <SlidersHorizontal :size="14" aria-hidden="true" />
+                                  Manual Scoring
+                                </button>
+                              </div>
+
+                              <template v-if="resultDetailTab === 'matrix'">
+                                <AnalysisPanel
+                                  v-if="selectedJobDetail.analysis"
+                                  :analysis="selectedJobDetail.analysis"
+                                  :show-resize="false"
+                                  :show-heading="false"
+                                  :flat="true"
+                                  @seek-to="seekFromScorecardEvidence"
+                                />
+                                <p v-else class="msg-muted">
+                                  No analysis output found.
+                                </p>
+                              </template>
+
+                              <template v-else>
+                                <div
+                                  v-if="
+                                    selectedJobDetail.analysis?.evaluation_table
+                                      ?.length
+                                  "
+                                  class="score-editor score-editor-standalone"
+                                >
+                                  <div class="score-editor-head">
+                                    <p class="score-editor-title">
+                                      Manual Score Override
+                                    </p>
+                                    <button
+                                      class="btn-primary"
+                                      :disabled="!canSubmitScoreEdits"
+                                      @click="submitScoreEdits"
+                                    >
+                                      {{
+                                        savingScoreEdits
+                                          ? "Saving..."
+                                          : "Save Score Edits"
+                                      }}
+                                    </button>
+                                  </div>
+
+                                  <p v-if="!canManageScores" class="msg-muted">
+                                    You do not have permission to edit scores.
+                                  </p>
+                                  <p
+                                    v-else-if="isBatchViewOnlyLocked"
+                                    class="msg-muted"
+                                  >
+                                    This batch is locked and now view-only.
+                                  </p>
+                                  <p
+                                    v-else-if="
+                                      selectedJobDetail.status !== 'completed'
+                                    "
+                                    class="msg-muted"
+                                  >
+                                    Scores can only be edited for completed
+                                    recordings.
+                                  </p>
+                                  <p
+                                    v-else-if="hasMissingScoreNotes"
+                                    class="msg-muted"
+                                  >
+                                    Add notes for each edited row before saving.
+                                  </p>
+
+                                  <div class="score-editor-list">
+                                    <div
+                                      v-for="row in resultScoreRows"
+                                      :key="row.id"
+                                      class="score-editor-row"
+                                    >
+                                      <div class="score-editor-row-head">
+                                        <p class="score-editor-row-title">
+                                          {{ row.area }}
+                                        </p>
+                                        <p class="score-editor-row-meta">
+                                          {{ row.parameter }} | Current:
+                                          {{ row.score }}/{{ row.max_score }}
+                                        </p>
+                                      </div>
+                                      <div class="score-editor-controls">
+                                        <button
+                                          class="btn-ghost score-toggle-btn"
+                                          :class="{
+                                            'score-toggle-active':
+                                              scoreEdits[row.id]?.score === 0,
+                                          }"
+                                          :disabled="
+                                            !canManageScores ||
+                                            isBatchViewOnlyLocked ||
+                                            selectedJobDetail.status !==
+                                              'completed'
+                                          "
+                                          @click="setRowDraftScore(row.id, 0)"
+                                        >
+                                          Fail (0/{{ row.max_score }})
+                                        </button>
+                                        <button
+                                          class="btn-ghost score-toggle-btn"
+                                          :class="{
+                                            'score-toggle-active':
+                                              scoreEdits[row.id]?.score ===
+                                              row.max_score,
+                                          }"
+                                          :disabled="
+                                            !canManageScores ||
+                                            isBatchViewOnlyLocked ||
+                                            selectedJobDetail.status !==
+                                              'completed'
+                                          "
+                                          @click="
+                                            setRowDraftScore(
+                                              row.id,
+                                              row.max_score,
+                                            )
+                                          "
+                                        >
+                                          Pass ({{ row.max_score }}/{{
+                                            row.max_score
+                                          }})
+                                        </button>
+                                      </div>
+                                      <textarea
+                                        class="input score-edit-note"
+                                        :disabled="
+                                          !canManageScores ||
+                                          isBatchViewOnlyLocked ||
+                                          selectedJobDetail.status !==
+                                            'completed' ||
+                                          (scoreEdits[row.id]?.score ??
+                                            row.score) === row.score
+                                        "
+                                        :value="scoreEdits[row.id]?.note || ''"
+                                        placeholder="Required note for edited score"
+                                        @input="
+                                          setRowDraftNote(
+                                            row.id,
+                                            (
+                                              $event.target as HTMLTextAreaElement
+                                            ).value,
+                                          )
+                                        "
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                                <p v-else class="msg-muted">
+                                  No score rows available for manual editing.
+                                </p>
+                              </template>
+                            </div>
                           </div>
                         </div>
-                        <div class="result-panel">
-                          <div class="result-panel-content-scroll">
-                            <AnalysisPanel
-                              v-if="selectedJobDetail.analysis"
-                              :analysis="selectedJobDetail.analysis"
-                              :show-resize="false"
-                              :show-heading="false"
-                              :flat="true"
-                              @seek-to="seekFromScorecardEvidence"
-                            />
-                            <p v-else class="msg-muted">
-                              No analysis output found.
+                        <div v-else class="msg-muted">
+                          Result not ready. Current status:
+                          {{ selectedJobMeta?.status || "unknown" }}.
+                        </div>
+                      </template>
+                      <template v-else>
+                        <p v-if="!canManageScores" class="msg-muted">
+                          You do not have permission to view scoring history.
+                        </p>
+                        <p v-else-if="loadingScoreHistory" class="msg-muted">
+                          Loading scoring history...
+                        </p>
+                        <div v-else-if="scoreHistory.length" class="score-history-list">
+                          <div
+                            v-for="entry in scoreHistory"
+                            :key="entry.id"
+                            class="score-history-row"
+                          >
+                            <div class="score-history-head">
+                              <p class="score-history-title">
+                                {{ entry.area }} ({{ entry.parameter }})
+                              </p>
+                              <span
+                                class="score-history-source"
+                                :class="{
+                                  'score-history-source-auto':
+                                    entry.changeSource === 'ce_strict_auto',
+                                }"
+                              >
+                                {{
+                                  entry.changeSource === "manual"
+                                    ? "Manual"
+                                    : "CE Strict Auto"
+                                }}
+                              </span>
+                            </div>
+                            <p class="score-history-meta">
+                              {{ entry.oldScore }}/{{ entry.maxScore }} ->
+                              {{ entry.newScore }}/{{ entry.maxScore }} | Row #{{
+                                entry.rowIndex + 1
+                              }}
+                            </p>
+                            <p class="score-history-meta">
+                              {{
+                                new Date(entry.createdAt).toLocaleString()
+                              }} |
+                              {{ entry.editedByEmail || entry.editedBy }}
+                            </p>
+                            <p class="score-history-note">
+                              {{ entry.reasonNote }}
                             </p>
                           </div>
                         </div>
-                      </div>
-                      <div v-else class="msg-muted">
-                        Result not ready. Current status:
-                        {{ selectedJobMeta?.status || "unknown" }}.
-                      </div>
+                        <p v-else class="msg-muted">
+                          No scoring edits recorded yet.
+                        </p>
+                      </template>
                     </div>
                   </div>
                 </div>
@@ -1706,6 +2297,10 @@ onUnmounted(() => {
   gap: 0.75rem;
 }
 
+.workspace-body-single-project {
+  grid-template-columns: 1fr;
+}
+
 .project-panel {
   border-radius: 0.9rem;
   border: 1px solid rgba(100, 116, 139, 0.3);
@@ -1822,12 +2417,41 @@ onUnmounted(() => {
   border-color: rgba(34, 211, 238, 0.7);
 }
 
+.history-row-locked {
+  border-color: rgba(251, 191, 36, 0.56);
+  box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.2);
+}
+
+.history-row-active.history-row-locked {
+  border-color: rgba(245, 158, 11, 0.85);
+}
+
 .history-main {
   text-align: left;
   display: flex;
   flex-direction: column;
   gap: 0.16rem;
   flex: 1;
+}
+
+.history-main-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.history-lock-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(251, 191, 36, 0.56);
+  color: #fbbf24;
+  background: rgba(146, 64, 14, 0.2);
 }
 
 .history-name,
@@ -2076,7 +2700,180 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: auto; /* Let the Scorecard scroll natively */
-  padding: 0 0.45rem 0.45rem 0.45rem;
+  padding: 0.45rem;
+  --result-tabs-sticky-offset: 2.5rem;
+}
+
+.result-panel-content-scroll-no-outer-scroll {
+  overflow: hidden;
+}
+
+.score-editor {
+  margin-top: 0.55rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(100, 116, 139, 0.35);
+  background: rgba(2, 6, 23, 0.4);
+  padding: 0.55rem;
+}
+
+.score-editor-standalone {
+  margin-top: 0.45rem;
+  height: calc(100% - 2.8rem);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.result-detail-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(2, 6, 23, 0.92);
+  border-bottom: 1px solid rgba(100, 116, 139, 0.35);
+  padding: 0.22rem 0 0.45rem 0;
+}
+
+.score-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  margin-bottom: 0.5rem;
+  position: sticky;
+  top: 0;
+  z-index: 19;
+  background: rgba(2, 6, 23, 0.9);
+  border-bottom: 1px solid rgba(100, 116, 139, 0.35);
+  padding: 0.2rem 0 0.42rem 0;
+}
+
+.score-editor-title {
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.score-editor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 0.1rem;
+}
+
+.score-editor-row {
+  border-radius: 0.56rem;
+  border: 1px solid rgba(100, 116, 139, 0.32);
+  background: rgba(15, 23, 42, 0.65);
+  padding: 0.46rem;
+}
+
+.score-editor-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.score-editor-row-title {
+  color: #e2e8f0;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.score-editor-row-meta {
+  color: #94a3b8;
+  font-size: 0.7rem;
+}
+
+.score-editor-controls {
+  margin-top: 0.38rem;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.score-toggle-btn {
+  padding: 0.34rem 0.48rem;
+  font-size: 0.7rem;
+}
+
+.score-toggle-active {
+  border-color: rgba(34, 211, 238, 0.68);
+  background: rgba(8, 47, 73, 0.45);
+  color: #bae6fd;
+}
+
+.score-edit-note {
+  margin-top: 0.4rem;
+  min-height: 2.2rem;
+  resize: vertical;
+  font-size: 0.72rem;
+}
+
+.score-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.score-history-row {
+  border-radius: 0.62rem;
+  border: 1px solid rgba(100, 116, 139, 0.36);
+  background: rgba(2, 6, 23, 0.45);
+  padding: 0.56rem;
+}
+
+.score-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.score-history-title {
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.score-history-source {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  color: #86efac;
+  background: rgba(22, 101, 52, 0.25);
+  padding: 0.1rem 0.46rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.score-history-source-auto {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: #fcd34d;
+  background: rgba(146, 64, 14, 0.26);
+}
+
+.score-history-meta {
+  margin-top: 0.25rem;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.score-history-note {
+  margin-top: 0.3rem;
+  color: #e2e8f0;
+  font-size: 0.75rem;
 }
 
 .result-summary {
@@ -2244,6 +3041,30 @@ onUnmounted(() => {
   gap: 0.65rem;
 }
 
+.result-modal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.result-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.34rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.5);
+  padding: 0.32rem 0.56rem;
+  font-size: 0.72rem;
+}
+
+.result-tab-btn-active {
+  border-color: rgba(34, 211, 238, 0.7);
+  color: #bae6fd;
+  background: rgba(8, 47, 73, 0.56);
+}
+
 .result-modal-title {
   color: #e2e8f0;
   font-size: 0.95rem;
@@ -2260,6 +3081,10 @@ onUnmounted(() => {
   min-height: 0;
   flex: 1;
   overflow: auto;
+}
+
+.result-modal-body-lock-scroll {
+  overflow: hidden;
 }
 
 .result-modal-body .result-layout {
@@ -2298,6 +3123,10 @@ onUnmounted(() => {
 
   .result-summary {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .score-editor-controls {
     flex-direction: column;
   }
 }
