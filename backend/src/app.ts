@@ -27,8 +27,38 @@ export const buildApp = async () => {
     maxParamLength: 5000,
   });
 
+  const corsOrigins = env.CORS_ORIGIN.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const allowAllOrigins = corsOrigins.includes("*");
+  const allowedOrigins = new Set(corsOrigins);
+  const isDev = env.NODE_ENV !== "production";
+
+  // Local dev commonly mixes localhost/127.0.0.1, keep both interchangeable.
+  if (allowedOrigins.has("http://localhost:5173")) {
+    allowedOrigins.add("http://127.0.0.1:5173");
+  }
+  if (allowedOrigins.has("http://127.0.0.1:5173")) {
+    allowedOrigins.add("http://localhost:5173");
+  }
+
   await app.register(cors, {
-    origin: env.CORS_ORIGIN,
+    origin: (origin, cb) => {
+      const isLocalDevOrigin =
+        typeof origin === "string" &&
+        /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin);
+
+      if (
+        !origin ||
+        allowAllOrigins ||
+        allowedOrigins.has(origin) ||
+        (isDev && isLocalDevOrigin)
+      ) {
+        cb(null, true);
+        return;
+      }
+      cb(new Error(`CORS blocked origin: ${origin}`), false);
+    },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],

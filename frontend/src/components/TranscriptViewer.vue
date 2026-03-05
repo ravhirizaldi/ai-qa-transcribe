@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
-import WaveSurfer from "wavesurfer.js";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import {
   Play,
   Pause,
@@ -24,8 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const waveformContainer = ref<HTMLElement | null>(null);
+const audioEl = ref<HTMLAudioElement | null>(null);
 const chatContainer = ref<HTMLElement | null>(null);
-const wavesurfer = ref<WaveSurfer | null>(null);
 const isPlaying = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
@@ -33,6 +32,7 @@ const activeSegmentId = ref<number | null>(null);
 const isWaveReady = ref(false);
 const resolvedAudioUrl = ref("");
 let localFileUrl: string | null = null;
+const WAVE_BAR_COUNT = 120;
 
 const resolveAudioUrl = () => {
   if (localFileUrl) {
@@ -49,57 +49,34 @@ const resolveAudioUrl = () => {
 
 const initWaveSurfer = () => {
   resolveAudioUrl();
-  // Initialize from remote audio or local files directly
-  if (!waveformContainer.value) return;
-
+  console.log("[audio][player] init", {
+    hasContainer: Boolean(waveformContainer.value),
+    hasFile: Boolean(props.file),
+    hasAudioUrlProp: Boolean(props.audioUrl),
+    sourceUrl: resolvedAudioUrl.value,
+  });
+  if (!audioEl.value) return;
   const sourceUrl = resolvedAudioUrl.value;
   if (!sourceUrl) return;
 
-  if (wavesurfer.value) {
-    wavesurfer.value.destroy();
-  }
+  isPlaying.value = false;
+  currentTime.value = 0;
+  duration.value = 0;
   isWaveReady.value = false;
-
-  const options: any = {
-    container: waveformContainer.value,
-    waveColor: "#64748b",
-    progressColor: "#22d3ee",
-    cursorColor: "#22d3ee",
-    barWidth: 2,
-    barGap: 3,
-    height: 72,
-    normalize: true,
-    interact: false,
-  };
-
-  wavesurfer.value = WaveSurfer.create(options);
-
-  wavesurfer.value.load(sourceUrl);
-
-  wavesurfer.value.on("ready", () => {
-    duration.value = wavesurfer.value?.getDuration() || 0;
-    isWaveReady.value = true;
-  });
-
-  wavesurfer.value.on("timeupdate", (time) => {
-    currentTime.value = time;
-    updateActiveSegment(time);
-  });
-
-  wavesurfer.value.on("finish", () => {
-    isPlaying.value = false;
-  });
-
-  wavesurfer.value.on("error", () => {
-    isWaveReady.value = false;
-  });
+  audioEl.value.src = sourceUrl;
+  audioEl.value.load();
 };
 
 const togglePlay = () => {
-  if (wavesurfer.value && isWaveReady.value) {
-    isPlaying.value = !isPlaying.value;
-    wavesurfer.value.playPause();
+  if (!audioEl.value || !isWaveReady.value) {
+    isPlaying.value = false;
+    return;
+  }
+  if (audioEl.value.paused) {
+    void audioEl.value.play();
+    isPlaying.value = true;
   } else {
+    audioEl.value.pause();
     isPlaying.value = false;
   }
 };
@@ -126,12 +103,12 @@ const scrollToSegment = (idx: number) => {
 };
 
 const seekAndPlay = (seconds: number) => {
-  const maxDuration = duration.value || wavesurfer.value?.getDuration() || seconds;
+  const maxDuration = duration.value || seconds;
   const target = Math.max(0, Math.min(maxDuration, seconds));
 
-  if (wavesurfer.value && isWaveReady.value) {
-    wavesurfer.value.setTime(target);
-    wavesurfer.value.play();
+  if (audioEl.value && isWaveReady.value) {
+    audioEl.value.currentTime = target;
+    void audioEl.value.play();
     isPlaying.value = true;
   }
 
@@ -144,7 +121,7 @@ const onWaveformClick = (event: MouseEvent) => {
   event.stopPropagation();
   const el = waveformContainer.value;
   if (!el) return;
-  const totalDuration = duration.value || wavesurfer.value?.getDuration() || 0;
+  const totalDuration = duration.value || 0;
   if (!totalDuration) return;
 
   const rect = el.getBoundingClientRect();
@@ -153,6 +130,41 @@ const onWaveformClick = (event: MouseEvent) => {
   const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
   const target = ratio * totalDuration;
   seekAndPlay(target);
+};
+
+const onAudioLoadedMetadata = () => {
+  if (!audioEl.value) return;
+  duration.value = Number.isFinite(audioEl.value.duration) ? audioEl.value.duration : 0;
+  isWaveReady.value = duration.value > 0;
+  console.log("[audio][player] loadedmetadata", { duration: duration.value });
+};
+
+const onAudioTimeUpdate = () => {
+  if (!audioEl.value) return;
+  currentTime.value = audioEl.value.currentTime;
+  updateActiveSegment(currentTime.value);
+};
+
+const onAudioPlay = () => {
+  isPlaying.value = true;
+};
+
+const onAudioPause = () => {
+  isPlaying.value = false;
+};
+
+const onAudioEnded = () => {
+  isPlaying.value = false;
+};
+
+const onAudioError = () => {
+  isWaveReady.value = false;
+  const mediaError = audioEl.value?.error;
+  console.error("[audio][player] error", {
+    sourceUrl: resolvedAudioUrl.value,
+    code: mediaError?.code,
+    message: mediaError?.message,
+  });
 };
 
 const jumpToSegment = (start: number) => {
@@ -169,6 +181,43 @@ const formatTime = (seconds: number) => {
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
+const deterministicNoise = (idx: number) => {
+  const seed = Math.sin((idx + 1) * 12.9898) * 43758.5453;
+  return seed - Math.floor(seed);
+};
+
+const waveformBars = computed(() => {
+  const total = duration.value;
+  if (!total) return [];
+
+  const windowSize = total / WAVE_BAR_COUNT;
+  return Array.from({ length: WAVE_BAR_COUNT }, (_, idx) => {
+    const start = idx * windowSize;
+    const end = start + windowSize;
+
+    let activity = 0;
+    for (const seg of props.segments) {
+      const segStart = Number(seg.start || 0);
+      const segEnd = Number(seg.end || segStart);
+      const overlap = Math.max(0, Math.min(end, segEnd) - Math.max(start, segStart));
+      if (overlap > 0) {
+        activity += overlap / windowSize;
+      }
+    }
+
+    const speaking = Math.max(0, Math.min(1, activity));
+    const base = 0.18;
+    const variance = 0.28 * deterministicNoise(idx);
+    const speechBoost = 0.5 * speaking;
+    const height = Math.max(0.08, Math.min(0.98, base + variance + speechBoost));
+    return { idx, height };
+  });
+});
+
+const playedRatio = computed(() =>
+  duration.value ? Math.max(0, Math.min(1, currentTime.value / duration.value)) : 0,
+);
+
 onMounted(() => {
   initWaveSurfer();
 });
@@ -181,8 +230,10 @@ watch(
 );
 
 onUnmounted(() => {
-  if (wavesurfer.value) {
-    wavesurfer.value.destroy();
+  if (audioEl.value) {
+    audioEl.value.pause();
+    audioEl.value.src = "";
+    audioEl.value.load();
   }
   if (localFileUrl) {
     URL.revokeObjectURL(localFileUrl);
@@ -231,6 +282,17 @@ defineExpose({
         </button>
 
         <div class="flex-1">
+          <audio
+            ref="audioEl"
+            class="hidden"
+            preload="auto"
+            @loadedmetadata="onAudioLoadedMetadata"
+            @timeupdate="onAudioTimeUpdate"
+            @play="onAudioPlay"
+            @pause="onAudioPause"
+            @ended="onAudioEnded"
+            @error="onAudioError"
+          />
           <div
             v-show="!isWaveReady"
             class="h-16 flex items-center justify-center text-cyan-200/50 text-xs gap-2"
@@ -243,9 +305,27 @@ defineExpose({
           <div
             v-show="isWaveReady"
             ref="waveformContainer"
-            class="h-16"
+            class="h-16 relative cursor-pointer rounded-lg overflow-hidden bg-slate-900/65 border border-slate-700/50 px-2"
             @click="onWaveformClick"
-          ></div>
+          >
+            <div class="absolute inset-0 flex items-center gap-[2px]">
+              <div
+                v-for="bar in waveformBars"
+                :key="bar.idx"
+                class="wave-bar"
+                :class="{
+                  'wave-bar-played': bar.idx / WAVE_BAR_COUNT <= playedRatio,
+                }"
+                :style="{ height: `${Math.round(bar.height * 100)}%` }"
+              ></div>
+            </div>
+            <div
+              class="absolute inset-y-0 wave-cursor"
+              :style="{ left: `${playedRatio * 100}%` }"
+            >
+              <div class="h-full bg-cyan-300"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -379,6 +459,23 @@ defineExpose({
   margin-top: 0.55rem;
   width: 100%;
   height: 2rem;
+}
+
+.wave-bar {
+  flex: 1;
+  align-self: center;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.5);
+  transition: background-color 0.1s ease;
+}
+
+.wave-bar-played {
+  background: rgba(34, 211, 238, 0.9);
+}
+
+.wave-cursor {
+  width: 2px;
+  transform: translateX(-1px);
 }
 
 .message-card {

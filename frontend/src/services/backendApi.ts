@@ -1,5 +1,7 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
-const WS_BASE = import.meta.env.VITE_WS_URL || "ws://localhost:3001/ws";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+const WS_BASE =
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
 const getToken = () => localStorage.getItem("qa_token") || "";
 
@@ -498,6 +500,19 @@ export const updateGlobalSettings = async (payload: {
   }>(response);
 };
 
+export const deleteAllQaHistory = async () => {
+  const response = await fetch(`${API_BASE}/settings/system/qa-history`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return parse<{
+    ok: boolean;
+    deletedBatches: number;
+    deletedJobs: number;
+    deletedFiles: number;
+  }>(response);
+};
+
 export const listAccessRoles = async () => {
   const response = await fetch(`${API_BASE}/settings/roles`, {
     headers: withAuth(),
@@ -754,6 +769,125 @@ export const getJobAudioUrl = (jobId: string) => {
     throw new Error("Missing auth token.");
   }
   return `${API_BASE}/jobs/${jobId}/audio?token=${encodeURIComponent(token)}`;
+};
+
+export const getJobAudioBlobUrl = async (jobId: string) => {
+  const token = getToken();
+  if (!token) {
+    throw new Error("Missing auth token.");
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const reqUrl = `${API_BASE}/jobs/${jobId}/audio?t=${Date.now()}`;
+    console.log("[audio][xhr] init", {
+      jobId,
+      apiBase: API_BASE,
+      reqUrl,
+      tokenLength: token.length,
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", reqUrl, true);
+    xhr.responseType = "blob";
+    xhr.timeout = 60_000;
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+
+    xhr.onreadystatechange = () => {
+      console.log("[audio][xhr] readyState", {
+        jobId,
+        readyState: xhr.readyState,
+        status: xhr.status,
+      });
+    };
+    xhr.onloadstart = () => {
+      console.log("[audio][xhr] loadstart", { jobId });
+    };
+    xhr.onprogress = (event) => {
+      console.log("[audio][xhr] progress", {
+        jobId,
+        loaded: event.loaded,
+        total: event.total,
+        lengthComputable: event.lengthComputable,
+      });
+    };
+
+    xhr.onload = () => {
+      console.log("[audio][xhr] load", {
+        jobId,
+        status: xhr.status,
+        statusText: xhr.statusText,
+        responseType: xhr.responseType,
+        contentType: xhr.getResponseHeader("content-type"),
+        contentLength: xhr.getResponseHeader("content-length"),
+      });
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const blob = xhr.response;
+        if (!blob) {
+          console.error("[audio][xhr] empty blob response", { jobId });
+          reject(new Error("Empty audio response"));
+          return;
+        }
+        console.log("[audio][xhr] success blob", {
+          jobId,
+          blobType: blob.type,
+          blobSize: blob.size,
+        });
+        resolve(URL.createObjectURL(blob));
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || "");
+        console.error("[audio][xhr] non-2xx response body", {
+          jobId,
+          status: xhr.status,
+          text,
+        });
+        try {
+          const parsed = JSON.parse(text) as { message?: unknown };
+          if (typeof parsed?.message === "string" && parsed.message.trim()) {
+            reject(new Error(parsed.message));
+            return;
+          }
+        } catch {
+          // no-op
+        }
+        reject(new Error(text || `Failed to load recording audio (${xhr.status})`));
+      };
+      reader.onerror = () =>
+        reject(new Error(`Failed to load recording audio (${xhr.status})`));
+      reader.readAsText(xhr.response);
+    };
+
+    xhr.onerror = () => {
+      console.error("[audio][xhr] onerror", {
+        jobId,
+        status: xhr.status,
+        statusText: xhr.statusText,
+      });
+      reject(new Error("Network error while loading recording audio"));
+    };
+    xhr.onabort = () => {
+      console.warn("[audio][xhr] onabort", { jobId });
+      reject(new Error("Recording audio request was aborted"));
+    };
+    xhr.ontimeout = () => {
+      console.error("[audio][xhr] timeout", { jobId, timeoutMs: xhr.timeout });
+      reject(new Error("Recording audio request timed out"));
+    };
+    xhr.onloadend = () => {
+      console.log("[audio][xhr] loadend", {
+        jobId,
+        status: xhr.status,
+        responseURL: xhr.responseURL,
+      });
+    };
+
+    console.log("[audio][xhr] send", { jobId, reqUrl });
+    xhr.send();
+  });
 };
 
 export const deleteJob = async (jobId: string) => {

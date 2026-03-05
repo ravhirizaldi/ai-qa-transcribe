@@ -4,7 +4,13 @@ import type { FastifyPluginAsync } from "fastify";
 import { db } from "../db.js";
 import {
   accessRoles,
+  batches,
   globalProviderSettings,
+  jobAnalyses,
+  jobEvaluationRows,
+  jobScoreEditHistory,
+  jobSegments,
+  jobTranscripts,
   jobs,
   projectMemberships,
   projects,
@@ -20,6 +26,7 @@ import {
   normalizeRoleScope,
 } from "../repos/access.js";
 import { hashPassword } from "../auth.js";
+import { deleteUploadFile } from "../storage.js";
 
 const SettingsRoleSchema = z.object({
   name: z.string().min(2),
@@ -66,6 +73,8 @@ const UpdatePasswordSchema = z.object({
 });
 
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
+  const activeJobStatuses = new Set(["queued", "uploading", "transcribing", "analyzing"]);
+
   app.post("/settings/users", { preHandler: app.authenticate }, async (request, reply) => {
     await assertSystemPermission((request.user as any).sub, "users:manage");
     const body = CreateUserSchema.parse(request.body);
@@ -474,6 +483,59 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
       hasXaiApiKey: Boolean(nextValues.xaiApiKey),
       xaiModel: nextValues.xaiModel,
+    };
+  });
+
+  app.delete("/settings/system/qa-history", { preHandler: app.authenticate }, async (request, reply) => {
+    await assertSystemPermission((request.user as any).sub, "system:manage");
+
+    const [allJobs, allBatches] = await Promise.all([
+      db.query.jobs.findMany({
+        columns: { id: true, status: true, filePath: true },
+      }),
+      db.query.batches.findMany({
+        columns: { id: true },
+      }),
+    ]);
+
+    const activeJobs = allJobs.filter((job) => activeJobStatuses.has(String(job.status)));
+    if (activeJobs.length) {
+      return reply.code(409).send({
+        message:
+          "Cannot reset QA history while recordings are still processing. Wait for queue to finish first.",
+        activeJobs: activeJobs.length,
+      });
+    }
+
+    const jobIds = allJobs.map((job) => job.id);
+    const batchCount = allBatches.length;
+    let deletedFiles = 0;
+
+    for (const job of allJobs) {
+      try {
+        await deleteUploadFile(job.filePath);
+        deletedFiles += 1;
+      } catch {
+        // Continue deleting DB rows even if file is already missing.
+      }
+    }
+
+    if (jobIds.length) {
+      await db.delete(jobScoreEditHistory).where(inArray(jobScoreEditHistory.jobId, jobIds));
+      await db.delete(jobEvaluationRows).where(inArray(jobEvaluationRows.jobId, jobIds));
+      await db.delete(jobAnalyses).where(inArray(jobAnalyses.jobId, jobIds));
+      await db.delete(jobSegments).where(inArray(jobSegments.jobId, jobIds));
+      await db.delete(jobTranscripts).where(inArray(jobTranscripts.jobId, jobIds));
+      await db.delete(jobs).where(inArray(jobs.id, jobIds));
+    }
+
+    await db.delete(batches);
+
+    return {
+      ok: true,
+      deletedBatches: batchCount,
+      deletedJobs: jobIds.length,
+      deletedFiles,
     };
   });
 };

@@ -2,7 +2,8 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { FastifyPluginAsync } from "fastify";
 import { basename, extname } from "node:path";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import { db } from "../db.js";
 import {
   batches,
@@ -833,11 +834,41 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
             : "application/octet-stream";
 
     try {
-      const data = await readFile(job.filePath);
+      const fileStat = await stat(job.filePath);
+      const fileSize = fileStat.size;
+      const rangeHeader = String(request.headers.range || "");
+
       reply.header("Content-Type", contentType);
       reply.header("Cache-Control", "private, max-age=60");
       reply.header("Content-Disposition", `inline; filename="${basename(job.fileName)}"`);
-      return reply.send(data);
+      reply.header("Accept-Ranges", "bytes");
+
+      if (rangeHeader.startsWith("bytes=")) {
+        const [startRaw, endRaw] = rangeHeader.replace("bytes=", "").split("-");
+        const parsedStart = Number.parseInt(startRaw || "0", 10);
+        const parsedEnd = Number.parseInt(endRaw || `${fileSize - 1}`, 10);
+
+        const start = Number.isFinite(parsedStart) ? parsedStart : 0;
+        const end = Number.isFinite(parsedEnd) ? parsedEnd : fileSize - 1;
+
+        if (start < 0 || end < start || start >= fileSize) {
+          return reply
+            .code(416)
+            .header("Content-Range", `bytes */${fileSize}`)
+            .send();
+        }
+
+        const safeEnd = Math.min(end, fileSize - 1);
+        const chunkSize = safeEnd - start + 1;
+
+        reply.code(206);
+        reply.header("Content-Range", `bytes ${start}-${safeEnd}/${fileSize}`);
+        reply.header("Content-Length", String(chunkSize));
+        return reply.send(createReadStream(job.filePath, { start, end: safeEnd }));
+      }
+
+      reply.header("Content-Length", String(fileSize));
+      return reply.send(createReadStream(job.filePath));
     } catch {
       return reply.code(404).send({ message: "Audio file not found" });
     }

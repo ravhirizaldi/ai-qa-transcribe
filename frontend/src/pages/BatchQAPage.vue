@@ -3,12 +3,15 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
 import {
+  AlertTriangle,
+  ArrowRight,
   FileText,
   History,
   Image as ImageIcon,
   Lock,
   SlidersHorizontal,
   Table2,
+  Trash2,
 } from "lucide-vue-next";
 import AudioUploader from "../components/AudioUploader.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
@@ -109,6 +112,7 @@ let confirmAction: null | (() => Promise<void>) = null;
 let ws: WebSocket | null = null;
 let pollTimer: number | null = null;
 let realtimeBatchId = "";
+let isWsConnected = false;
 
 const batchNamesById = ref<Record<string, string>>({});
 const BATCH_NAME_KEY = "qa_batch_names_v1";
@@ -675,6 +679,7 @@ const loadSelectedJobDetail = async (opts?: { silent?: boolean }) => {
 
 const stopRealtime = () => {
   realtimeBatchId = "";
+  isWsConnected = false;
   if (pollTimer) {
     window.clearInterval(pollTimer);
     pollTimer = null;
@@ -683,6 +688,13 @@ const stopRealtime = () => {
     ws.close();
     ws = null;
   }
+};
+
+const startRealtimePollingFallback = () => {
+  if (pollTimer || isWsConnected) return;
+  pollTimer = window.setInterval(() => {
+    void loadSelectedBatchDetail({ silent: true });
+  }, 2000);
 };
 
 const startRealtime = () => {
@@ -702,25 +714,34 @@ const startRealtime = () => {
     ws = connectWs((event: any) => {
       if (event.batchId === selectedBatchId.value) {
         void loadSelectedBatchDetail({ silent: true });
-        void loadHistory({ silent: true, preserveSelection: true });
       }
     });
     ws.onopen = () => {
       if (!ws || !selectedBatchId.value) return;
       if (realtimeBatchId !== selectedBatchId.value) return;
+      isWsConnected = true;
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
       subscribeBatch(ws, selectedBatchId.value);
       for (const job of selectedBatchJobs.value) {
         subscribeJob(ws, job.id);
       }
     };
+    ws.onerror = () => {
+      isWsConnected = false;
+      startRealtimePollingFallback();
+    };
+    ws.onclose = () => {
+      isWsConnected = false;
+      if (realtimeBatchId === selectedBatchId.value) {
+        startRealtimePollingFallback();
+      }
+    };
   } catch {
-    // Polling fallback keeps updates flowing.
+    startRealtimePollingFallback();
   }
-
-  pollTimer = window.setInterval(() => {
-    void loadSelectedBatchDetail({ silent: true });
-    void loadHistory({ silent: true, preserveSelection: true });
-  }, 2000);
 };
 
 const openTenantWorkspace = async (
@@ -755,7 +776,7 @@ const openTenantWorkspace = async (
 const closeWorkspace = async () => {
   showWorkspace.value = false;
   showResultModal.value = false;
-  selectedJobAudioUrl.value = null;
+  clearSelectedJobAudioUrl();
   resetResultModalScoreState();
   selectedProjectId.value = "";
   projects.value = [];
@@ -763,6 +784,10 @@ const closeWorkspace = async () => {
   selectedBatchId.value = "";
   batchDetails.value = null;
   await syncRoute();
+};
+
+const openManageForMatrixSetup = async () => {
+  await router.push("/manage");
 };
 
 const selectWorkspaceProject = async (projectId: string) => {
@@ -1051,12 +1076,41 @@ const seekFromScorecardEvidence = (seconds: number) => {
   resultTranscriptRef.value?.seekTo(seconds);
 };
 
+const clearSelectedJobAudioUrl = () => {
+  console.log("[audio][page] clearSelectedJobAudioUrl", {
+    selectedJobId: selectedJobId.value,
+  });
+  selectedJobAudioUrl.value = null;
+};
+
 const loadSelectedJobAudio = async () => {
-  if (!selectedJobId.value) return;
+  const jobId = selectedJobId.value;
+  if (!jobId) {
+    console.warn("[audio][page] loadSelectedJobAudio skipped: no jobId");
+    return;
+  }
+  console.log("[audio][page] loadSelectedJobAudio start", {
+    jobId,
+    modalOpen: showResultModal.value,
+  });
+  clearSelectedJobAudioUrl();
   try {
-    selectedJobAudioUrl.value = getJobAudioUrl(selectedJobId.value);
+    const audioUrl = getJobAudioUrl(jobId);
+    console.log("[audio][page] loadSelectedJobAudio url generated", {
+      jobId,
+      audioUrl,
+    });
+    selectedJobAudioUrl.value = audioUrl;
+    console.log("[audio][page] loadSelectedJobAudio assigned", {
+      jobId,
+      selectedJobAudioUrl: selectedJobAudioUrl.value,
+    });
   } catch (error) {
-    selectedJobAudioUrl.value = null;
+    console.error("[audio][page] loadSelectedJobAudio failed", {
+      jobId,
+      error,
+    });
+    clearSelectedJobAudioUrl();
     toast.error(
       error instanceof Error ? error.message : "Failed to load recording audio",
     );
@@ -1239,7 +1293,7 @@ const deleteBatchAction = async (batch: BatchHistoryItem) => {
 watch(selectedBatchId, async () => {
   jobsCurrentPage.value = 1;
   showResultModal.value = false;
-  selectedJobAudioUrl.value = null;
+  clearSelectedJobAudioUrl();
   resetResultModalScoreState();
   await syncRoute();
   await loadSelectedBatchDetail();
@@ -1253,7 +1307,7 @@ watch(selectedJobId, async () => {
   if (selectedIndex >= 0) {
     jobsCurrentPage.value = Math.floor(selectedIndex / jobsPageSize) + 1;
   }
-  selectedJobAudioUrl.value = null;
+  clearSelectedJobAudioUrl();
   await loadSelectedJobDetail();
   if (showResultModal.value) {
     hydrateScoreEditsFromDetail();
@@ -1292,7 +1346,7 @@ watch(
       // URL has no tenant — user navigated away to plain /batch; reset the workspace
       showWorkspace.value = false;
       showResultModal.value = false;
-      selectedJobAudioUrl.value = null;
+      clearSelectedJobAudioUrl();
       resetResultModalScoreState();
       selectedProjectId.value = "";
       projects.value = [];
@@ -1358,6 +1412,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  clearSelectedJobAudioUrl();
   stopRealtime();
 });
 </script>
@@ -1494,11 +1549,52 @@ onUnmounted(() => {
               Checking matrix...
             </div>
             <template v-else>
-              <div v-if="!hasMatrixForProject" class="alert-card">
-                <h3>No Matrix Component</h3>
-                <p>{{ matrixMessage }}</p>
+              <div v-if="!hasMatrixForProject" class="matrix-empty-state">
+                <div class="matrix-empty-hero">
+                  <div class="matrix-empty-icon-wrap">
+                    <AlertTriangle class="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p class="matrix-empty-kicker">Batch QA Blocked</p>
+                    <h3 class="matrix-empty-title">No Active Matrix Found</h3>
+                    <p class="matrix-empty-desc">
+                      This workspace is ready, but scoring cannot start until a
+                      matrix version is active for
+                      <strong>{{ inferredCallType.toUpperCase() }}</strong>.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="matrix-empty-steps">
+                  <div class="matrix-step-chip">
+                    <span class="matrix-step-num">1</span>
+                    <span>Open <strong>Manage</strong></span>
+                  </div>
+                  <div class="matrix-step-chip">
+                    <span class="matrix-step-num">2</span>
+                    <span>Create or update {{ inferredCallType }} matrix rows</span>
+                  </div>
+                  <div class="matrix-step-chip">
+                    <span class="matrix-step-num">3</span>
+                    <span>Activate latest matrix version</span>
+                  </div>
+                </div>
+
+                <p v-if="matrixMessage" class="matrix-empty-detail">
+                  Backend detail: {{ matrixMessage }}
+                </p>
+
+                <div class="matrix-empty-actions">
+                  <button class="btn-primary" @click="openManageForMatrixSetup">
+                    Configure Matrix
+                    <ArrowRight class="w-3.5 h-3.5" />
+                  </button>
+                  <button class="btn-ghost" @click="checkMatrix">
+                    I Activated It, Recheck
+                  </button>
+                </div>
               </div>
-              <div class="qa-layout">
+              <div v-else class="qa-layout">
                 <div class="history-panel panel-card">
                   <div class="history-head">
                     <p class="panel-title">Batch Timeline</p>
@@ -1531,27 +1627,34 @@ onUnmounted(() => {
                           <span class="history-name">{{
                             getBatchName(batch)
                           }}</span>
-                          <span
-                            v-if="batch.isLocked"
-                            class="history-lock-indicator"
-                            title="Locked (view-only)"
-                            aria-label="Locked (view-only)"
-                          >
-                            <Lock :size="12" aria-hidden="true" />
-                          </span>
                         </div>
                         <span class="history-meta"
                           >{{ new Date(batch.createdAt).toLocaleString() }} |
                           {{ batch.totalJobs }} files</span
                         >
                       </button>
-                      <button
-                        v-if="canManageJobs && canDeleteBatch(batch)"
-                        class="btn-danger"
-                        @click="deleteBatchAction(batch)"
+                      <div
+                        v-if="batch.isLocked || (canManageJobs && canDeleteBatch(batch))"
+                        class="history-actions"
                       >
-                        Delete
-                      </button>
+                        <span
+                          v-if="batch.isLocked"
+                          class="history-lock-indicator"
+                          title="Locked (view-only)"
+                          aria-label="Locked (view-only)"
+                        >
+                          <Lock :size="12" aria-hidden="true" />
+                        </span>
+                        <button
+                          v-if="canManageJobs && canDeleteBatch(batch)"
+                          class="history-delete-btn"
+                          title="Delete batch"
+                          aria-label="Delete batch"
+                          @click="deleteBatchAction(batch)"
+                        >
+                          <Trash2 :size="13" aria-hidden="true" />
+                        </button>
+                      </div>
                     </div>
                     <p v-if="!history.length" class="msg-muted">
                       No batches yet. Create your first batch to get started.
@@ -2437,21 +2540,45 @@ onUnmounted(() => {
 .history-main-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
+}
+
+.history-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: 0.62rem;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.4);
 }
 
 .history-lock-indicator {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.15rem;
-  height: 1.15rem;
   flex-shrink: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(251, 191, 36, 0.56);
-  color: #fbbf24;
-  background: rgba(146, 64, 14, 0.2);
+  inline-size: 2rem;
+  block-size: 1.9rem;
+  border-right: 1px solid rgba(148, 163, 184, 0.28);
+  color: #fb923c;
+  background: rgba(248, 250, 252, 0.08);
+}
+
+.history-delete-btn {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  inline-size: 2rem;
+  block-size: 1.9rem;
+  color: #ffe4e6;
+  background: linear-gradient(180deg, rgba(244, 63, 94, 0.95), rgba(225, 29, 72, 0.95));
+  transition: filter 0.18s ease, transform 0.18s ease;
+}
+
+.history-delete-btn:hover {
+  filter: brightness(1.06);
+  transform: translateY(-1px);
 }
 
 .history-name,
@@ -2934,23 +3061,106 @@ onUnmounted(() => {
   padding: 0.8rem;
 }
 
-.alert-card {
-  border-radius: 0.8rem;
-  border: 1px solid rgba(251, 113, 133, 0.55);
-  background: rgba(127, 29, 29, 0.28);
-  padding: 0.75rem;
+.matrix-empty-state {
+  border-radius: 0.95rem;
+  border: 1px solid rgba(251, 146, 60, 0.5);
+  background:
+    radial-gradient(
+      circle at 0% 0%,
+      rgba(251, 146, 60, 0.18),
+      rgba(15, 23, 42, 0.94) 45%
+    ),
+    linear-gradient(180deg, rgba(30, 41, 59, 0.7), rgba(2, 6, 23, 0.84));
+  padding: 0.95rem;
 }
 
-.alert-card h3 {
-  color: #fecdd3;
+.matrix-empty-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+}
+
+.matrix-empty-icon-wrap {
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: 0.65rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fdba74;
+  border: 1px solid rgba(251, 146, 60, 0.55);
+  background: rgba(124, 45, 18, 0.45);
+}
+
+.matrix-empty-kicker {
+  color: #fdba74;
+  font-size: 0.67rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.matrix-empty-title {
+  margin-top: 0.15rem;
+  color: #ffedd5;
   font-weight: 700;
-  font-size: 0.9rem;
+  font-size: 1rem;
 }
 
-.alert-card p {
-  margin-top: 0.25rem;
-  color: #ffe4e6;
+.matrix-empty-desc {
+  margin-top: 0.35rem;
+  color: #fed7aa;
   font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.matrix-empty-steps {
+  margin-top: 0.7rem;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.42rem;
+}
+
+.matrix-step-chip {
+  border-radius: 0.62rem;
+  border: 1px solid rgba(251, 146, 60, 0.36);
+  background: rgba(124, 45, 18, 0.22);
+  color: #ffedd5;
+  font-size: 0.76rem;
+  padding: 0.35rem 0.48rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.matrix-step-num {
+  inline-size: 1.15rem;
+  block-size: 1.15rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #431407;
+  background: #fdba74;
+}
+
+.matrix-empty-detail {
+  margin-top: 0.62rem;
+  border-radius: 0.58rem;
+  border: 1px dashed rgba(251, 146, 60, 0.45);
+  background: rgba(2, 6, 23, 0.38);
+  color: #fcd34d;
+  padding: 0.4rem 0.48rem;
+  font-size: 0.72rem;
+}
+
+.matrix-empty-actions {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.48rem;
 }
 
 .create-modal-backdrop {

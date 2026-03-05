@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { toast } from "vue-sonner";
-import { getGlobalSettings, updateGlobalSettings } from "../../services/backendApi";
+import {
+  deleteAllQaHistory,
+  getGlobalSettings,
+  updateGlobalSettings,
+} from "../../services/backendApi";
 
 const elevenlabsApiKey = ref("");
 const xaiApiKey = ref("");
@@ -10,6 +14,7 @@ const xaiModel = ref("grok-4-1-fast-non-reasoning");
 const hasElevenlabs = ref(false);
 const hasXai = ref(false);
 const isSaving = ref(false);
+const isResettingQaHistory = ref(false);
 
 const load = async () => {
   try {
@@ -43,6 +48,32 @@ const save = async () => {
   }
 };
 
+const resetQaHistory = async () => {
+  if (
+    !confirm(
+      "Delete ALL QA batches/history in ALL tenants and remove related audio files? This cannot be undone.",
+    )
+  ) {
+    return;
+  }
+
+  if (!confirm("Final confirmation: proceed with global QA history reset?")) {
+    return;
+  }
+
+  isResettingQaHistory.value = true;
+  try {
+    const result = await deleteAllQaHistory();
+    toast.success(
+      `Reset complete. Deleted ${result.deletedBatches} batches, ${result.deletedJobs} jobs, ${result.deletedFiles} files.`,
+    );
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to reset QA history");
+  } finally {
+    isResettingQaHistory.value = false;
+  }
+};
+
 onMounted(() => {
   void load();
 });
@@ -72,6 +103,22 @@ onMounted(() => {
           <input v-model="xaiModel" type="text" class="input grow" />
           <button @click="save" :disabled="isSaving" class="btn-primary">
             {{ isSaving ? "Saving..." : "Save" }}
+          </button>
+        </div>
+      </div>
+
+      <div class="field-card wide danger-card">
+        <label class="label danger-label">Danger Zone</label>
+        <p class="meta danger-meta">
+          Delete all QA batches/history across all tenants and remove related uploaded audio files.
+        </p>
+        <div class="row">
+          <button
+            @click="resetQaHistory"
+            :disabled="isResettingQaHistory"
+            class="btn-danger"
+          >
+            {{ isResettingQaHistory ? "Resetting..." : "Delete All QA History" }}
           </button>
         </div>
       </div>
@@ -148,6 +195,30 @@ onMounted(() => {
   font-weight: 700;
   color: #082f49;
   background: linear-gradient(180deg, rgba(34, 211, 238, 0.95), rgba(8, 145, 178, 0.95));
+}
+.danger-card {
+  border-color: rgba(244, 63, 94, 0.5);
+  background: rgba(127, 29, 29, 0.25);
+}
+.danger-label {
+  color: #fecdd3;
+  font-weight: 700;
+}
+.danger-meta {
+  color: #fecdd3;
+}
+.btn-danger {
+  border-radius: 0.6rem;
+  padding: 0.46rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #ffe4e6;
+  border: 1px solid rgba(244, 63, 94, 0.7);
+  background: linear-gradient(180deg, rgba(244, 63, 94, 0.9), rgba(190, 24, 93, 0.92));
+}
+.btn-danger:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 @media (min-width: 1024px) {
   .grid {
