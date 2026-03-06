@@ -38,6 +38,12 @@ export const jobScoreEditChangeSourceEnum = pgEnum("job_score_edit_change_source
   "manual",
   "ce_strict_auto",
 ]);
+export const ragDocSyncStatusEnum = pgEnum("rag_doc_sync_status", [
+  "pending",
+  "synced",
+  "failed",
+  "deleted",
+]);
 
 export const users = pgTable("users", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -104,6 +110,7 @@ export const projects = pgTable(
     logoUrl: text("logo_url"),
     supportsInbound: boolean("supports_inbound").default(true).notNull(),
     supportsOutbound: boolean("supports_outbound").default(false).notNull(),
+    xaiCollectionId: text("xai_collection_id"),
     ceScoringPolicy: ceScoringPolicyEnum("ce_scoring_policy")
       .default("strict_zero_all_ce_if_any_fail")
       .notNull(),
@@ -131,6 +138,8 @@ export const globalProviderSettings = pgTable("global_provider_settings", {
   elevenlabsApiKey: text("elevenlabs_api_key"),
   xaiApiKey: text("xai_api_key"),
   xaiModel: text("xai_model"),
+  xaiManagementApiKey: text("xai_management_api_key"),
+  xaiRagModel: text("xai_rag_model"),
   updatedBy: uuid("updated_by").references(() => users.id),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -300,4 +309,42 @@ export const jobScoreEditHistory = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [index("job_score_edit_history_job_created_idx").on(t.jobId, t.createdAt)],
+);
+
+export const projectRagDocuments = pgTable(
+  "project_rag_documents",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: uuid("tenant_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    jobId: uuid("job_id").notNull(),
+    jobScoreEditHistoryId: uuid("job_score_edit_history_id").notNull().unique(),
+    jobEvaluationRowId: uuid("job_evaluation_row_id").notNull(),
+    rowIndex: integer("row_index").notNull(),
+    area: text("area").notNull(),
+    parameter: text("parameter").notNull(),
+    oldScore: integer("old_score").notNull(),
+    newScore: integer("new_score").notNull(),
+    maxScore: integer("max_score").notNull(),
+    reasonNote: text("reason_note").notNull(),
+    fileName: text("file_name").notNull(),
+    docSha256: text("doc_sha256").notNull(),
+    xaiCollectionId: text("xai_collection_id"),
+    xaiFileId: text("xai_file_id"),
+    syncStatus: ragDocSyncStatusEnum("sync_status").default("pending").notNull(),
+    syncAttempts: integer("sync_attempts").default(0).notNull(),
+    lastError: text("last_error"),
+    uploadedAt: timestamp("uploaded_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("project_rag_documents_project_status_created_idx").on(
+      t.projectId,
+      t.syncStatus,
+      t.createdAt,
+    ),
+    index("project_rag_documents_job_created_idx").on(t.jobId, t.createdAt),
+  ],
 );

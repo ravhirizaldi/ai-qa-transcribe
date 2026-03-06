@@ -455,7 +455,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     return {
       hasElevenlabsApiKey: Boolean(settings?.elevenlabsApiKey),
       hasXaiApiKey: Boolean(settings?.xaiApiKey),
+      hasXaiManagementApiKey: Boolean(settings?.xaiManagementApiKey),
       xaiModel: settings?.xaiModel || "grok-4-1-fast-non-reasoning",
+      xaiRagModel: settings?.xaiRagModel || "grok-4-1-fast-reasoning",
     };
   });
 
@@ -466,6 +468,8 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
         elevenlabsApiKey: z.string().optional(),
         xaiApiKey: z.string().optional(),
         xaiModel: z.string().optional(),
+        xaiManagementApiKey: z.string().optional(),
+        xaiRagModel: z.string().optional(),
       })
       .parse(request.body);
 
@@ -479,11 +483,21 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
           ? payload.elevenlabsApiKey || null
           : existing?.elevenlabsApiKey || null,
       xaiApiKey:
-        payload.xaiApiKey !== undefined ? payload.xaiApiKey || null : existing?.xaiApiKey || null,
+        payload.xaiApiKey !== undefined
+          ? payload.xaiApiKey || null
+          : existing?.xaiApiKey || null,
       xaiModel:
         payload.xaiModel !== undefined
           ? payload.xaiModel || null
           : existing?.xaiModel || "grok-4-1-fast-non-reasoning",
+      xaiManagementApiKey:
+        payload.xaiManagementApiKey !== undefined
+          ? payload.xaiManagementApiKey || null
+          : existing?.xaiManagementApiKey || null,
+      xaiRagModel:
+        payload.xaiRagModel !== undefined
+          ? payload.xaiRagModel || null
+          : existing?.xaiRagModel || "grok-4-1-fast-reasoning",
       updatedBy: (request.user as any).sub,
     };
 
@@ -500,7 +514,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       ok: true,
       hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
       hasXaiApiKey: Boolean(nextValues.xaiApiKey),
+      hasXaiManagementApiKey: Boolean(nextValues.xaiManagementApiKey),
       xaiModel: nextValues.xaiModel,
+      xaiRagModel: nextValues.xaiRagModel,
     };
   });
 

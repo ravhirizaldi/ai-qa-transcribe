@@ -72,6 +72,7 @@ export const analyzeConversation = async (
   matrixRows: MatrixRow[],
   xaiApiKey: string,
   model: string,
+  ragGuidance?: string | null,
   context?: { jobId?: string; batchId?: string },
 ) => {
   const startedAt = Date.now();
@@ -101,6 +102,13 @@ export const analyzeConversation = async (
         `- [${idx}] area="${m.area}" type="${m.parameter}" max_weight=${m.weight} criteria="${m.description}"`,
     )
     .join("\n");
+  const ragGuidanceText = String(ragGuidance || "").trim();
+  const ragGuidanceBlock = ragGuidanceText
+    ? `
+Project Knowledge Base Docs (hasil koreksi manual QA sebelumnya):
+${ragGuidanceText}
+`
+    : "";
 
   let object: z.infer<typeof ConversationAnalysisSchema>;
 
@@ -114,8 +122,11 @@ Output concise Bahasa Indonesia. Be factual, no repetition.
 
 Evaluation Matrix Criteria (with Max Weights):
 ${criteriaList}
+${ragGuidanceBlock}
 
 Rules:
+- Jika ada panduan dari Knowledge Base Docs, gunakan sebagai referensi pola keputusan.
+- Jika ada konflik antara panduan dan bukti transcript/matrix aktif, prioritaskan transcript + matrix aktif.
 - transcript_cleanup: role must be CS or Customer, keep meaning, remove fillers, keep each cleaned_text short.
 - qa_scorecard.evaluation_table: return compact rows ONLY with row_index, score, note, evidence_timestamp.
   - Evaluate each matrix row index from the list above.

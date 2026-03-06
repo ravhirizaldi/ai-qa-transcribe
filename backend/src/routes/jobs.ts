@@ -595,6 +595,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
             }),
           )
           .min(1),
+        addToRag: z.boolean().default(true),
       })
       .parse(request.body);
 
@@ -742,6 +743,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
+    let insertedHistory: Array<{
+      id: string;
+      changeSource: "manual" | "ce_strict_auto";
+    }> = [];
+
     await db.transaction(async (tx) => {
       for (const row of updates) {
         await tx
@@ -769,15 +775,36 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         editedBy: userId,
       }));
       if (historyValues.length) {
-        await tx.insert(jobScoreEditHistory).values(historyValues);
+        insertedHistory = await tx
+          .insert(jobScoreEditHistory)
+          .values(historyValues)
+          .returning({
+            id: jobScoreEditHistory.id,
+            changeSource: jobScoreEditHistory.changeSource,
+          });
       }
     });
+
+    let ragEnqueued = 0;
+    if (body.addToRag) {
+      for (const entry of insertedHistory) {
+        if (entry.changeSource !== SCORE_EDIT_SOURCE_MANUAL) continue;
+        await boss.send(QUEUES.RAG_SYNC_CORRECTION, {
+          scoreEditHistoryId: entry.id,
+          jobId: job.id,
+          tenantId: job.tenantId,
+          projectId: job.projectId,
+        });
+        ragEnqueued += 1;
+      }
+    }
 
     return {
       ok: true,
       totalScore,
       updatedRows: updates.length,
       strictAutoAdjustedRows: strictAutoEntries.length,
+      ragEnqueued,
     };
   });
 

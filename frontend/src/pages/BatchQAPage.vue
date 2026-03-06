@@ -71,7 +71,9 @@ const selectedJobId = ref("");
 const selectedJobDetail = ref<JobDetail | null>(null);
 const loadingJobDetail = ref(false);
 const selectedJobAudioUrl = ref<string | null>(null);
-const resultTranscriptRef = ref<{ seekTo: (seconds: number) => void } | null>(null);
+const resultTranscriptRef = ref<{ seekTo: (seconds: number) => void } | null>(
+  null,
+);
 
 const jobsWithAnalysis = ref<Record<string, any>>({});
 const activeMatrixRows = ref<any[]>([]);
@@ -100,6 +102,7 @@ const isSuperAdmin = ref(false);
 const resultModalTab = ref<"result" | "history">("result");
 const resultDetailTab = ref<"matrix" | "manual">("matrix");
 const scoreEdits = ref<Record<string, { score: number; note: string }>>({});
+const addScoreEditsToRag = ref(true);
 const savingScoreEdits = ref(false);
 const scoreHistory = ref<JobScoreHistoryEntry[]>([]);
 const loadingScoreHistory = ref(false);
@@ -154,11 +157,11 @@ const applyDominantLogoColor = (event: Event) => {
     let bSum = 0;
     let count = 0;
     for (let i = 0; i < data.length; i += 4) {
-      const alpha = data[i + 3];
+      const alpha = data[i + 3] ?? 0;
       if (alpha < 40) continue;
-      rSum += data[i];
-      gSum += data[i + 1];
-      bSum += data[i + 2];
+      rSum += data[i] ?? 0;
+      gSum += data[i + 1] ?? 0;
+      bSum += data[i + 2] ?? 0;
       count += 1;
     }
     if (!count) return;
@@ -352,7 +355,8 @@ const ceNceScores = computed(() => {
       ? ((totalOpportunities - totalNCEDefects) / totalOpportunities) * 100
       : 0;
 
-  const integratedQAScore = totalSamples > 0 ? ceAccuracy * 0.6 + nceAccuracy * 0.4 : 0;
+  const integratedQAScore =
+    totalSamples > 0 ? ceAccuracy * 0.6 + nceAccuracy * 0.4 : 0;
 
   return {
     ceDefectSamples,
@@ -378,7 +382,8 @@ const hasQueuedJobs = computed(() =>
   selectedBatchJobs.value.some((job) => job.status === "queued"),
 );
 const selectedHistoryBatch = computed(
-  () => history.value.find((batch) => batch.id === selectedBatchId.value) || null,
+  () =>
+    history.value.find((batch) => batch.id === selectedBatchId.value) || null,
 );
 const selectedBatchCreatorName = computed(() => {
   const name =
@@ -478,7 +483,9 @@ const syncRoute = async () => {
   const nextTenant = showWorkspace.value ? selectedTenantId.value || "" : "";
   const nextProject = showWorkspace.value ? selectedProjectId.value || "" : "";
   const nextBatch =
-    showWorkspace.value && selectedProjectId.value ? selectedBatchId.value || "" : "";
+    showWorkspace.value && selectedProjectId.value
+      ? selectedBatchId.value || ""
+      : "";
 
   if (
     currentTenant === nextTenant &&
@@ -669,12 +676,18 @@ const loadSelectedBatchDetail = async (opts?: { silent?: boolean }) => {
   }
 };
 
-const loadSelectedJobDetail = async (opts?: { silent?: boolean }) => {
+const loadSelectedJobDetail = async (opts?: {
+  silent?: boolean;
+  keepContent?: boolean;
+}) => {
   if (!selectedJobId.value) {
     selectedJobDetail.value = null;
     return;
   }
-  loadingJobDetail.value = true;
+  const showLoading = !opts?.keepContent;
+  if (showLoading) {
+    loadingJobDetail.value = true;
+  }
   try {
     selectedJobDetail.value = await getJob(selectedJobId.value);
   } catch (error) {
@@ -686,7 +699,9 @@ const loadSelectedJobDetail = async (opts?: { silent?: boolean }) => {
       );
     }
   } finally {
-    loadingJobDetail.value = false;
+    if (showLoading) {
+      loadingJobDetail.value = false;
+    }
   }
 };
 
@@ -778,7 +793,9 @@ const openTenantWorkspace = async (
   await checkMatrix();
   await loadHistory();
   if (preferredBatchId) {
-    const existing = history.value.find((batch) => batch.id === preferredBatchId);
+    const existing = history.value.find(
+      (batch) => batch.id === preferredBatchId,
+    );
     if (existing) {
       selectedBatchId.value = existing.id;
     }
@@ -865,6 +882,7 @@ const closeCreateBatchModal = () => {
 
 const resetResultModalScoreState = () => {
   scoreEdits.value = {};
+  addScoreEditsToRag.value = true;
   scoreHistory.value = [];
   scoreHistoryLoadedForJobId.value = "";
   resultModalTab.value = "result";
@@ -905,9 +923,7 @@ const loadScoreHistory = async () => {
     scoreHistoryLoadedForJobId.value = selectedJobId.value;
   } catch (error) {
     toast.error(
-      error instanceof Error
-        ? error.message
-        : "Failed to load scoring history",
+      error instanceof Error ? error.message : "Failed to load scoring history",
     );
   } finally {
     loadingScoreHistory.value = false;
@@ -941,16 +957,23 @@ const submitScoreEdits = async () => {
 
   savingScoreEdits.value = true;
   try {
-    const result = await updateJobScores(selectedJobId.value, { edits });
+    const result = await updateJobScores(selectedJobId.value, {
+      edits,
+      addToRag: addScoreEditsToRag.value,
+    });
     toast.success(
       `Saved ${result.updatedRows} row update(s)${
         result.strictAutoAdjustedRows
           ? ` (${result.strictAutoAdjustedRows} CE strict auto-adjusted)`
           : ""
+      }${
+        addScoreEditsToRag.value
+          ? `, queued ${result.ragEnqueued} RAG doc(s)`
+          : ""
       }`,
     );
 
-    await loadSelectedJobDetail({ silent: true });
+    await loadSelectedJobDetail({ silent: true, keepContent: true });
     if (selectedJobDetail.value) {
       jobsWithAnalysis.value[selectedJobId.value] = selectedJobDetail.value;
       hydrateScoreEditsFromDetail();
@@ -1479,31 +1502,32 @@ onUnmounted(() => {
           <div class="tenant-stats">
             <template v-if="tenantPreviewStats[tenant.id]">
               <span class="tenant-stat-chip"
-                >Projects {{ tenantPreviewStats[tenant.id].projects }}</span
+                >Projects
+                {{ tenantPreviewStats[tenant.id]?.projects ?? 0 }}</span
               >
               <span class="tenant-stat-chip"
-                >Batches {{ tenantPreviewStats[tenant.id].batches }}</span
+                >Batches {{ tenantPreviewStats[tenant.id]?.batches ?? 0 }}</span
               >
               <span class="tenant-stat-chip"
-                >Samples {{ tenantPreviewStats[tenant.id].recordings }}</span
+                >Samples
+                {{ tenantPreviewStats[tenant.id]?.recordings ?? 0 }}</span
               >
               <span class="tenant-stat-chip"
-                >Done {{ tenantPreviewStats[tenant.id].completed }}</span
+                >Done {{ tenantPreviewStats[tenant.id]?.completed ?? 0 }}</span
               >
               <span class="tenant-stat-chip"
-                >Failed {{ tenantPreviewStats[tenant.id].failed }}</span
+                >Failed {{ tenantPreviewStats[tenant.id]?.failed ?? 0 }}</span
               >
               <span class="tenant-stat-chip"
-                >In Progress {{ tenantPreviewStats[tenant.id].inProgress }}</span
+                >In Progress
+                {{ tenantPreviewStats[tenant.id]?.inProgress ?? 0 }}</span
               >
             </template>
-            <span
-              v-else
-              class="tenant-meta"
-              >{{
-                loadingTenantPreviewStats ? "Loading tenant metrics..." : "No metrics yet"
-              }}</span
-            >
+            <span v-else class="tenant-meta">{{
+              loadingTenantPreviewStats
+                ? "Loading tenant metrics..."
+                : "No metrics yet"
+            }}</span>
           </div>
         </button>
       </div>
@@ -1573,7 +1597,8 @@ onUnmounted(() => {
                     <p class="matrix-empty-desc">
                       This workspace is ready, but scoring cannot start until a
                       matrix version is active for
-                      <strong>{{ inferredCallType.toUpperCase() }}</strong>.
+                      <strong>{{ inferredCallType.toUpperCase() }}</strong
+                      >.
                     </p>
                   </div>
                 </div>
@@ -1585,7 +1610,9 @@ onUnmounted(() => {
                   </div>
                   <div class="matrix-step-chip">
                     <span class="matrix-step-num">2</span>
-                    <span>Create or update {{ inferredCallType }} matrix rows</span>
+                    <span
+                      >Create or update {{ inferredCallType }} matrix rows</span
+                    >
                   </div>
                   <div class="matrix-step-chip">
                     <span class="matrix-step-num">3</span>
@@ -1647,7 +1674,10 @@ onUnmounted(() => {
                         >
                       </button>
                       <div
-                        v-if="batch.isLocked || (canManageJobs && canDeleteBatch(batch))"
+                        v-if="
+                          batch.isLocked ||
+                          (canManageJobs && canDeleteBatch(batch))
+                        "
                         class="history-actions"
                       >
                         <span
@@ -1747,15 +1777,16 @@ onUnmounted(() => {
                         </button>
                         <button
                           class="btn-analyze"
-                          :disabled="!canManageJobs || !hasQueuedJobs || isBatchLocked"
+                          :disabled="
+                            !canManageJobs || !hasQueuedJobs || isBatchLocked
+                          "
                           @click="startAnalyzeQueued"
                           :title="
                             isBatchViewOnlyLocked
                               ? 'Batch is locked and view-only'
-                              :
-                            !hasQueuedJobs
-                              ? 'No queued recordings ready'
-                              : 'Run QA on queued recordings'
+                              : !hasQueuedJobs
+                                ? 'No queued recordings ready'
+                                : 'Run QA on queued recordings'
                           "
                         >
                           Run QA
@@ -1777,7 +1808,9 @@ onUnmounted(() => {
                       <AudioUploader
                         :is-processing="uploading"
                         :multiple="true"
-                        :disabled="!canManageJobs || !selectedBatchId || isBatchLocked"
+                        :disabled="
+                          !canManageJobs || !selectedBatchId || isBatchLocked
+                        "
                         button-label="Browse Files"
                         @files-selected="onFilesSelected"
                       />
@@ -1836,7 +1869,10 @@ onUnmounted(() => {
                         </div>
                       </div>
                     </div>
-                    <div v-if="batchDetails?.jobs?.length" class="jobs-pagination">
+                    <div
+                      v-if="batchDetails?.jobs?.length"
+                      class="jobs-pagination"
+                    >
                       <button
                         class="btn-ghost"
                         :disabled="jobsCurrentPage <= 1"
@@ -1848,7 +1884,9 @@ onUnmounted(() => {
                         v-for="page in jobsPageNumbers"
                         :key="page"
                         class="jobs-page-btn"
-                        :class="{ 'jobs-page-btn-active': page === jobsCurrentPage }"
+                        :class="{
+                          'jobs-page-btn-active': page === jobsCurrentPage,
+                        }"
                         @click="jobsCurrentPage = page"
                       >
                         {{ page }}
@@ -1973,7 +2011,9 @@ onUnmounted(() => {
                             </div>
                           </div>
                           <div class="result-panel">
-                            <div class="result-panel-content-scroll result-panel-content-scroll-no-outer-scroll">
+                            <div
+                              class="result-panel-content-scroll result-panel-content-scroll-no-outer-scroll"
+                            >
                               <div class="result-detail-tabs">
                                 <button
                                   class="result-tab-btn"
@@ -1994,7 +2034,10 @@ onUnmounted(() => {
                                   }"
                                   @click="resultDetailTab = 'manual'"
                                 >
-                                  <SlidersHorizontal :size="14" aria-hidden="true" />
+                                  <SlidersHorizontal
+                                    :size="14"
+                                    aria-hidden="true"
+                                  />
                                   Manual Scoring
                                 </button>
                               </div>
@@ -2025,17 +2068,27 @@ onUnmounted(() => {
                                     <p class="score-editor-title">
                                       Manual Score Override
                                     </p>
-                                    <button
-                                      class="btn-primary"
-                                      :disabled="!canSubmitScoreEdits"
-                                      @click="submitScoreEdits"
-                                    >
-                                      {{
-                                        savingScoreEdits
-                                          ? "Saving..."
-                                          : "Save Score Edits"
-                                      }}
-                                    </button>
+                                    <div class="score-editor-head-actions">
+                                      <label class="score-rag-toggle">
+                                        <input
+                                          v-model="addScoreEditsToRag"
+                                          type="checkbox"
+                                          :disabled="savingScoreEdits"
+                                        />
+                                        Add to Knowledge Base
+                                      </label>
+                                      <button
+                                        class="btn-primary"
+                                        :disabled="!canSubmitScoreEdits"
+                                        @click="submitScoreEdits"
+                                      >
+                                        {{
+                                          savingScoreEdits
+                                            ? "Saving..."
+                                            : "Save Score Edits"
+                                        }}
+                                      </button>
+                                    </div>
                                   </div>
 
                                   <p v-if="!canManageScores" class="msg-muted">
@@ -2163,7 +2216,10 @@ onUnmounted(() => {
                         <p v-else-if="loadingScoreHistory" class="msg-muted">
                           Loading scoring history...
                         </p>
-                        <div v-else-if="scoreHistory.length" class="score-history-list">
+                        <div
+                          v-else-if="scoreHistory.length"
+                          class="score-history-list"
+                        >
                           <div
                             v-for="entry in scoreHistory"
                             :key="entry.id"
@@ -2189,14 +2245,11 @@ onUnmounted(() => {
                             </div>
                             <p class="score-history-meta">
                               {{ entry.oldScore }}/{{ entry.maxScore }} ->
-                              {{ entry.newScore }}/{{ entry.maxScore }} | Row #{{
-                                entry.rowIndex + 1
-                              }}
+                              {{ entry.newScore }}/{{ entry.maxScore }} | Row
+                              #{{ entry.rowIndex + 1 }}
                             </p>
                             <p class="score-history-meta">
-                              {{
-                                new Date(entry.createdAt).toLocaleString()
-                              }} |
+                              {{ new Date(entry.createdAt).toLocaleString() }} |
                               {{
                                 entry.editedByFullname ||
                                 entry.editedByEmail ||
@@ -2590,8 +2643,14 @@ onUnmounted(() => {
   inline-size: 2rem;
   block-size: 1.9rem;
   color: #ffe4e6;
-  background: linear-gradient(180deg, rgba(244, 63, 94, 0.95), rgba(225, 29, 72, 0.95));
-  transition: filter 0.18s ease, transform 0.18s ease;
+  background: linear-gradient(
+    180deg,
+    rgba(244, 63, 94, 0.95),
+    rgba(225, 29, 72, 0.95)
+  );
+  transition:
+    filter 0.18s ease,
+    transform 0.18s ease;
 }
 
 .history-delete-btn:hover {
@@ -2896,12 +2955,30 @@ onUnmounted(() => {
   padding: 0.2rem 0 0.42rem 0;
 }
 
+.score-editor-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
 .score-editor-title {
   color: #e2e8f0;
   font-size: 0.78rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+}
+
+.score-rag-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  color: #cbd5e1;
+  font-size: 0.72rem;
+}
+
+.score-rag-toggle input[type="checkbox"] {
+  accent-color: #06b6d4;
 }
 
 .score-editor-list {
@@ -3352,6 +3429,16 @@ onUnmounted(() => {
   .result-summary {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .score-editor-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .score-editor-head-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .score-editor-controls {

@@ -85,6 +85,13 @@
       "when": 1772692200000,
       "tag": "0011_users_fullname",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1772805600000,
+      "tag": "0012_rag_collections",
+      "breakpoints": true
     }
   ]
 }

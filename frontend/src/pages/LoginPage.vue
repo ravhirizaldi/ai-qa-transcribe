@@ -26,6 +26,7 @@ const getAuthErrorMessage = (error: unknown) => {
       }>;
       if (Array.isArray(parsed) && parsed.length) {
         const first = parsed[0];
+        if (!first) return msg;
         const field = Array.isArray(first.path) ? String(first.path[0] || "") : "";
         const detail = String(first.message || "").toLowerCase();
         if (field === "password" && detail.includes("too small")) {

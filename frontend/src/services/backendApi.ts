@@ -99,6 +99,47 @@ export type Project = {
     | "weighted_ce_independent";
 };
 
+export type RagDocSyncStatus = "pending" | "synced" | "failed" | "deleted";
+
+export type ProjectRagSummary = {
+  projectId: string;
+  collectionId: string | null;
+  counts: {
+    pending: number;
+    synced: number;
+    failed: number;
+    deleted: number;
+  };
+  lastSyncedAt: string | null;
+};
+
+export type ProjectRagDoc = {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  jobId: string;
+  rowIndex: number;
+  area: string;
+  parameter: string;
+  oldScore: number;
+  newScore: number;
+  maxScore: number;
+  reasonNote: string;
+  fileName: string;
+  syncStatus: RagDocSyncStatus;
+  xaiCollectionId: string | null;
+  xaiFileId: string | null;
+  uploadedAt: string | null;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectRagDocsPage = {
+  items: ProjectRagDoc[];
+  nextCursor: string | null;
+};
+
 export type BatchHistoryItem = {
   id: string;
   tenantId: string;
@@ -506,7 +547,9 @@ export const getGlobalSettings = async () => {
   return parse<{
     hasElevenlabsApiKey: boolean;
     hasXaiApiKey: boolean;
+    hasXaiManagementApiKey: boolean;
     xaiModel: string;
+    xaiRagModel: string;
   }>(response);
 };
 
@@ -514,6 +557,8 @@ export const updateGlobalSettings = async (payload: {
   elevenlabsApiKey?: string;
   xaiApiKey?: string;
   xaiModel?: string;
+  xaiManagementApiKey?: string;
+  xaiRagModel?: string;
 }) => {
   const response = await fetch(`${API_BASE}/settings/system`, {
     method: "PUT",
@@ -524,8 +569,69 @@ export const updateGlobalSettings = async (payload: {
     ok: boolean;
     hasElevenlabsApiKey: boolean;
     hasXaiApiKey: boolean;
+    hasXaiManagementApiKey: boolean;
     xaiModel: string;
+    xaiRagModel: string;
   }>(response);
+};
+
+export const getProjectRagSummary = async (tenantId: string, projectId: string) => {
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/summary`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<ProjectRagSummary>(response);
+};
+
+export const listProjectRagDocs = async (
+  tenantId: string,
+  projectId: string,
+  query?: { status?: RagDocSyncStatus; limit?: number; cursor?: string },
+) => {
+  const params = new URLSearchParams();
+  if (query?.status) params.set("status", query.status);
+  if (typeof query?.limit === "number") params.set("limit", String(query.limit));
+  if (query?.cursor) params.set("cursor", query.cursor);
+  const qs = params.toString();
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/docs${qs ? `?${qs}` : ""}`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<ProjectRagDocsPage>(response);
+};
+
+export const deleteProjectRagDoc = async (
+  tenantId: string,
+  projectId: string,
+  ragDocId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/docs/${ragDocId}`,
+    {
+      method: "DELETE",
+      headers: withAuth(),
+    },
+  );
+  return parse<{ ok: boolean; remoteDeleted: boolean }>(response);
+};
+
+export const retryProjectRagDoc = async (
+  tenantId: string,
+  projectId: string,
+  ragDocId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/docs/${ragDocId}/retry`,
+    {
+      method: "POST",
+      headers: withAuth(),
+    },
+  );
+  return parse<{ ok: boolean }>(response);
 };
 
 export const deleteAllQaHistory = async () => {
@@ -771,6 +877,7 @@ export const updateJobScores = async (
   jobId: string,
   payload: {
     edits: Array<{ rowId: string; score: number; note: string }>;
+    addToRag?: boolean;
   },
 ) => {
   const response = await fetch(`${API_BASE}/jobs/${jobId}/scores`, {
@@ -783,6 +890,7 @@ export const updateJobScores = async (
     totalScore: number;
     updatedRows: number;
     strictAutoAdjustedRows: number;
+    ragEnqueued: number;
   }>(response);
 };
 

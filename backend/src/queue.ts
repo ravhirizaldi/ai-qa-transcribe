@@ -5,6 +5,7 @@ export const QUEUES = {
   TRANSCRIBE: "job.transcribe",
   ANALYZE: "job.analyze",
   FINALIZE: "job.finalize",
+  RAG_SYNC_CORRECTION: "rag.sync.correction",
   WS_EVENTS: "ws.events",
 } as const;
 

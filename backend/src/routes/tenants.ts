@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { access } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { extname, resolve } from "node:path";
@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { FastifyPluginAsync } from "fastify";
 import { db } from "../db.js";
 import { env } from "../config.js";
+import { boss, QUEUES } from "../queue.js";
 import {
   batches,
   globalProviderSettings,
@@ -15,6 +16,7 @@ import {
   jobs,
   jobSegments,
   jobTranscripts,
+  projectRagDocuments,
   projectMemberships,
   projectMatrixRows,
   projectMatrixVersions,
@@ -25,6 +27,7 @@ import {
 } from "../../drizzle/schema.js";
 import {
   assertProjectAccess,
+  assertProjectPermission,
   assertSystemPermission,
   assertTenantAccess,
   listAccessibleProjects,
@@ -69,7 +72,10 @@ const GlobalSettingsSchema = z.object({
   elevenlabsApiKey: z.string().optional(),
   xaiApiKey: z.string().optional(),
   xaiModel: z.string().optional(),
+  xaiManagementApiKey: z.string().optional(),
+  xaiRagModel: z.string().optional(),
 });
+const RagDocStatusSchema = z.enum(["pending", "synced", "failed", "deleted"]);
 
 const UserVisibilitySchema = z.object({
   isRestricted: z.boolean(),
@@ -83,7 +89,52 @@ const assertManageRole = (role: string) => {
   }
 };
 
+const XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai/v1";
+const DEFAULT_XAI_MODEL = "grok-4-1-fast-non-reasoning";
+const DEFAULT_RAG_MODEL = "grok-4-1-fast-reasoning";
+
+const resolveXaiManagementKey = (settings: {
+  xaiManagementApiKey?: string | null;
+}) => String(settings.xaiManagementApiKey || "").trim();
+
+const deleteXaiCollectionBestEffort = async (collectionId: string) => {
+  const settings = await db.query.globalProviderSettings.findFirst({
+    orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    columns: { xaiManagementApiKey: true },
+  });
+  const key = resolveXaiManagementKey(settings || {});
+  if (!key || !collectionId) return false;
+  try {
+    const response = await fetch(
+      `${XAI_MANAGEMENT_BASE_URL}/collections/${encodeURIComponent(collectionId)}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${key}` },
+      },
+    );
+    return response.ok || response.status === 404;
+  } catch {
+    return false;
+  }
+};
+
 const deleteProjectCascade = async (projectId: string) => {
+  const project = await db.query.projects.findFirst({
+    where: eq(projects.id, projectId),
+    columns: { xaiCollectionId: true },
+  });
+  const collectionId = String(project?.xaiCollectionId || "").trim();
+  if (collectionId) {
+    const deleted = await deleteXaiCollectionBestEffort(collectionId);
+    if (!deleted) {
+      console.warn(
+        `Failed to delete xAI collection ${collectionId} for project ${projectId}`,
+      );
+    }
+  }
+
+  await db.delete(projectRagDocuments).where(eq(projectRagDocuments.projectId, projectId));
+
   const projectJobs = await db.query.jobs.findMany({
     where: eq(jobs.projectId, projectId),
     columns: { id: true },
@@ -379,6 +430,228 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
+  app.get(
+    "/tenants/:tenantId/projects/:projectId/rag/summary",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = z
+        .object({ tenantId: z.string().uuid(), projectId: z.string().uuid() })
+        .parse(request.params);
+      const userId = (request.user as any).sub as string;
+      const project = await assertProjectAccess(params.tenantId, params.projectId, userId);
+
+      const rows = await db.query.projectRagDocuments.findMany({
+        where: eq(projectRagDocuments.projectId, project.id),
+        columns: {
+          syncStatus: true,
+          uploadedAt: true,
+        },
+      });
+
+      const counts = { pending: 0, synced: 0, failed: 0, deleted: 0 };
+      let lastSyncedAt: string | null = null;
+      for (const row of rows) {
+        counts[row.syncStatus] += 1;
+        if (row.syncStatus !== "synced" || !row.uploadedAt) continue;
+        if (!lastSyncedAt || row.uploadedAt.toISOString() > lastSyncedAt) {
+          lastSyncedAt = row.uploadedAt.toISOString();
+        }
+      }
+
+      return {
+        projectId: project.id,
+        collectionId: project.xaiCollectionId || null,
+        counts,
+        lastSyncedAt,
+      };
+    },
+  );
+
+  app.get(
+    "/tenants/:tenantId/projects/:projectId/rag/docs",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = z
+        .object({ tenantId: z.string().uuid(), projectId: z.string().uuid() })
+        .parse(request.params);
+      const query = z
+        .object({
+          status: RagDocStatusSchema.optional(),
+          limit: z.coerce.number().int().min(1).max(100).default(20),
+          cursor: z.string().datetime().optional(),
+        })
+        .parse(request.query);
+      const userId = (request.user as any).sub as string;
+      await assertProjectAccess(params.tenantId, params.projectId, userId);
+
+      const whereClauses = [eq(projectRagDocuments.projectId, params.projectId)];
+      if (query.status) {
+        whereClauses.push(eq(projectRagDocuments.syncStatus, query.status));
+      }
+      if (query.cursor) {
+        whereClauses.push(lt(projectRagDocuments.createdAt, new Date(query.cursor)));
+      }
+
+      const items = await db.query.projectRagDocuments.findMany({
+        where: and(...whereClauses),
+        orderBy: (t, { desc }) => [desc(t.createdAt)],
+        limit: query.limit,
+      });
+
+      const last = items[items.length - 1];
+      const nextCursor = items.length === query.limit && last ? last.createdAt.toISOString() : null;
+
+      return {
+        items: items.map((item) => ({
+          id: item.id,
+          tenantId: item.tenantId,
+          projectId: item.projectId,
+          jobId: item.jobId,
+          rowIndex: item.rowIndex,
+          area: item.area,
+          parameter: item.parameter,
+          oldScore: item.oldScore,
+          newScore: item.newScore,
+          maxScore: item.maxScore,
+          reasonNote: item.reasonNote,
+          fileName: item.fileName,
+          syncStatus: item.syncStatus,
+          xaiCollectionId: item.xaiCollectionId,
+          xaiFileId: item.xaiFileId,
+          uploadedAt: item.uploadedAt,
+          deletedAt: item.deletedAt,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+        })),
+        nextCursor,
+      };
+    },
+  );
+
+  app.delete(
+    "/tenants/:tenantId/projects/:projectId/rag/docs/:ragDocId",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = z
+        .object({
+          tenantId: z.string().uuid(),
+          projectId: z.string().uuid(),
+          ragDocId: z.string().uuid(),
+        })
+        .parse(request.params);
+      const userId = (request.user as any).sub as string;
+
+      await assertProjectAccess(params.tenantId, params.projectId, userId);
+      await assertProjectPermission(
+        params.tenantId,
+        params.projectId,
+        userId,
+        "scores:manage",
+      );
+
+      const doc = await db.query.projectRagDocuments.findFirst({
+        where: and(
+          eq(projectRagDocuments.id, params.ragDocId),
+          eq(projectRagDocuments.projectId, params.projectId),
+        ),
+      });
+      if (!doc) {
+        return reply.code(404).send({ message: "RAG document not found" });
+      }
+
+      let remoteDeleted = false;
+      const collectionId = String(doc.xaiCollectionId || "").trim();
+      const fileId = String(doc.xaiFileId || "").trim();
+      const settings = await db.query.globalProviderSettings.findFirst({
+        orderBy: (t, { desc }) => [desc(t.updatedAt)],
+        columns: { xaiManagementApiKey: true },
+      });
+      const managementKey = resolveXaiManagementKey(settings || {});
+
+      if (collectionId && fileId && managementKey) {
+        try {
+          const response = await fetch(
+            `${XAI_MANAGEMENT_BASE_URL}/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(fileId)}`,
+            {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${managementKey}` },
+            },
+          );
+          remoteDeleted = response.ok || response.status === 404;
+        } catch {
+          remoteDeleted = false;
+        }
+      }
+
+      await db
+        .update(projectRagDocuments)
+        .set({
+          syncStatus: "deleted",
+          deletedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(projectRagDocuments.id, doc.id));
+
+      return { ok: true, remoteDeleted };
+    },
+  );
+
+  app.post(
+    "/tenants/:tenantId/projects/:projectId/rag/docs/:ragDocId/retry",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = z
+        .object({
+          tenantId: z.string().uuid(),
+          projectId: z.string().uuid(),
+          ragDocId: z.string().uuid(),
+        })
+        .parse(request.params);
+      const userId = (request.user as any).sub as string;
+
+      await assertProjectAccess(params.tenantId, params.projectId, userId);
+      await assertProjectPermission(
+        params.tenantId,
+        params.projectId,
+        userId,
+        "scores:manage",
+      );
+
+      const doc = await db.query.projectRagDocuments.findFirst({
+        where: and(
+          eq(projectRagDocuments.id, params.ragDocId),
+          eq(projectRagDocuments.projectId, params.projectId),
+        ),
+      });
+      if (!doc) {
+        return reply.code(404).send({ message: "RAG document not found" });
+      }
+      if (doc.syncStatus !== "failed") {
+        return reply.code(400).send({
+          message: "Only failed RAG documents can be retried",
+        });
+      }
+
+      await db
+        .update(projectRagDocuments)
+        .set({
+          syncStatus: "pending",
+          lastError: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(projectRagDocuments.id, doc.id));
+
+      await boss.send(QUEUES.RAG_SYNC_CORRECTION, {
+        scoreEditHistoryId: doc.jobScoreEditHistoryId,
+        jobId: doc.jobId,
+        tenantId: doc.tenantId,
+        projectId: doc.projectId,
+      });
+
+      return { ok: true };
+    },
+  );
+
   app.get("/settings/global", { preHandler: app.authenticate }, async (request) => {
     await assertSystemPermission((request.user as any).sub, "settings:view");
     const settings = await db.query.globalProviderSettings.findFirst({
@@ -388,7 +661,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     return {
       hasElevenlabsApiKey: Boolean(settings?.elevenlabsApiKey),
       hasXaiApiKey: Boolean(settings?.xaiApiKey),
-      xaiModel: settings?.xaiModel || "grok-4-1-fast-non-reasoning",
+      hasXaiManagementApiKey: Boolean(settings?.xaiManagementApiKey),
+      xaiModel: settings?.xaiModel || DEFAULT_XAI_MODEL,
+      xaiRagModel: settings?.xaiRagModel || DEFAULT_RAG_MODEL,
     };
   });
 
@@ -405,11 +680,21 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           ? payload.elevenlabsApiKey || null
           : existing?.elevenlabsApiKey || null,
       xaiApiKey:
-        payload.xaiApiKey !== undefined ? payload.xaiApiKey || null : existing?.xaiApiKey || null,
+        payload.xaiApiKey !== undefined
+          ? payload.xaiApiKey || null
+          : existing?.xaiApiKey || null,
       xaiModel:
         payload.xaiModel !== undefined
           ? payload.xaiModel || null
-          : existing?.xaiModel || "grok-4-1-fast-non-reasoning",
+          : existing?.xaiModel || DEFAULT_XAI_MODEL,
+      xaiManagementApiKey:
+        payload.xaiManagementApiKey !== undefined
+          ? payload.xaiManagementApiKey || null
+          : existing?.xaiManagementApiKey || null,
+      xaiRagModel:
+        payload.xaiRagModel !== undefined
+          ? payload.xaiRagModel || null
+          : existing?.xaiRagModel || DEFAULT_RAG_MODEL,
       updatedBy: (request.user as any).sub,
     };
 
@@ -426,7 +711,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       ok: true,
       hasElevenlabsApiKey: Boolean(nextValues.elevenlabsApiKey),
       hasXaiApiKey: Boolean(nextValues.xaiApiKey),
+      hasXaiManagementApiKey: Boolean(nextValues.xaiManagementApiKey),
       xaiModel: nextValues.xaiModel,
+      xaiRagModel: nextValues.xaiRagModel,
     };
   });
 

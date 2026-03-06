@@ -18,11 +18,14 @@ import {
 } from "./schema.js";
 import { transcribeAudioFile } from "./services/transcribe.js";
 import { analyzeConversation } from "./services/analyze.js";
+import { syncManualScoreEditToRag } from "./services/rag.js";
+import { fetchRagGuidance } from "./services/ragRetrieve.js";
 
 const QUEUES = {
   TRANSCRIBE: "job.transcribe",
   ANALYZE: "job.analyze",
   FINALIZE: "job.finalize",
+  RAG_SYNC_CORRECTION: "rag.sync.correction",
   WS_EVENTS: "ws.events",
 } as const;
 
@@ -36,6 +39,17 @@ const extractJobIdFromPayload = (payload: unknown): string | null => {
   const jobLike = Array.isArray(payload) ? payload[0] : payload;
   const data = (jobLike as any)?.data;
   const raw = data?.jobId;
+  if (!raw) return null;
+  return String(raw);
+};
+
+const extractFieldFromPayload = (
+  payload: unknown,
+  key: string,
+): string | null => {
+  const jobLike = Array.isArray(payload) ? payload[0] : payload;
+  const data = (jobLike as any)?.data;
+  const raw = data?.[key];
   if (!raw) return null;
   return String(raw);
 };
@@ -69,11 +83,20 @@ const getProviderConfig = async () => {
   const elevenlabsApiKey = settings?.elevenlabsApiKey || env.ELEVENLABS_API_KEY;
   const xaiApiKey = settings?.xaiApiKey || env.XAI_API_KEY;
   const xaiModel = settings?.xaiModel || env.XAI_MODEL;
+  const xaiManagementApiKey =
+    settings?.xaiManagementApiKey || env.XAI_MANAGEMENT_API_KEY;
+  const xaiRagModel = settings?.xaiRagModel || env.XAI_RAG_MODEL;
 
   if (!elevenlabsApiKey) throw new Error("Missing global ElevenLabs API key");
   if (!xaiApiKey) throw new Error("Missing global xAI API key");
 
-  return { elevenlabsApiKey, xaiApiKey, xaiModel };
+  return {
+    elevenlabsApiKey,
+    xaiApiKey,
+    xaiModel,
+    xaiManagementApiKey,
+    xaiRagModel,
+  };
 };
 
 const publishBatchProgress = async (batchId: string, tenantId: string, projectId: string) => {
@@ -177,6 +200,7 @@ const start = async () => {
   await boss.createQueue(QUEUES.TRANSCRIBE);
   await boss.createQueue(QUEUES.ANALYZE);
   await boss.createQueue(QUEUES.FINALIZE);
+  await boss.createQueue(QUEUES.RAG_SYNC_CORRECTION);
   await boss.createQueue(QUEUES.WS_EVENTS);
 
   await boss.work(QUEUES.TRANSCRIBE, async (payload: any) => {
@@ -256,12 +280,26 @@ const start = async () => {
       });
       const project = await db.query.projects.findFirst({
         where: eq(projects.id, current.projectId),
-        columns: { ceScoringPolicy: true },
+        columns: { ceScoringPolicy: true, xaiCollectionId: true },
       });
       const ceScoringPolicy =
         project?.ceScoringPolicy === WEIGHTED_CE_POLICY
           ? WEIGHTED_CE_POLICY
           : STRICT_CE_POLICY;
+      const ragGuidance = await fetchRagGuidance({
+        xaiApiKey: provider.xaiApiKey,
+        ragModel: provider.xaiRagModel,
+        collectionId: project?.xaiCollectionId || null,
+        callType: current.callType,
+        matrixRows: matrixRows.map((row) => ({
+          area: row.area,
+          parameter: row.parameter,
+          description: row.description,
+          weight: row.weight,
+        })),
+        jobId,
+        batchId: current.batchId,
+      });
 
       const result = await analyzeConversation(
         segments.map((seg, idx) => ({
@@ -280,6 +318,7 @@ const start = async () => {
         })),
         provider.xaiApiKey,
         provider.xaiModel,
+        ragGuidance,
         { jobId, batchId: current.batchId },
       );
       const adjustedEvaluationTable = result.qa_scorecard.evaluation_table.map(
@@ -352,6 +391,19 @@ const start = async () => {
       // Keep failed state final; manual retry is handled by API/UI.
       return;
     }
+  });
+
+  await boss.work(QUEUES.RAG_SYNC_CORRECTION, async (payload: any) => {
+    const scoreEditHistoryId = extractFieldFromPayload(payload, "scoreEditHistoryId");
+    if (!scoreEditHistoryId) {
+      throw new Error("Invalid RAG sync payload: missing scoreEditHistoryId");
+    }
+
+    const provider = await getProviderConfig();
+    await syncManualScoreEditToRag({
+      scoreEditHistoryId,
+      managementApiKey: String(provider.xaiManagementApiKey || ""),
+    });
   });
 
   await boss.work(QUEUES.FINALIZE, async (payload: any) => {

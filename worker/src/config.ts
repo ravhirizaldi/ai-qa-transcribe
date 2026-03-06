@@ -8,6 +8,8 @@ const EnvSchema = z.object({
   ELEVENLABS_API_KEY: z.string().optional(),
   XAI_API_KEY: z.string().optional(),
   XAI_MODEL: z.string().default("grok-4-1-fast-non-reasoning"),
+  XAI_MANAGEMENT_API_KEY: z.string().optional(),
+  XAI_RAG_MODEL: z.string().default("grok-4-1-fast-reasoning"),
 });
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));

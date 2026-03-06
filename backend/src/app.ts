@@ -77,6 +77,7 @@ export const buildApp = async () => {
 
   await startQueue();
   await boss.createQueue(QUEUES.WS_EVENTS);
+  await boss.createQueue(QUEUES.RAG_SYNC_CORRECTION);
   await boss.work(QUEUES.WS_EVENTS, async (payload: any) => {
     const jobs = Array.isArray(payload) ? payload : [payload];
     for (const job of jobs) {

@@ -2,19 +2,26 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { toast } from "vue-sonner";
-import { Image as ImageIcon, MoreVertical } from "lucide-vue-next";
+import { Image as ImageIcon, MoreVertical, RotateCcw } from "lucide-vue-next";
 import {
   activateMatrixVersion,
   createMatrixVersion,
   createProject,
   createTenant,
+  deleteProjectRagDoc,
   deleteMatrixVersion,
   deleteProject,
   deleteTenant,
   getMatrixVersion,
+  getProjectRagSummary,
   listMatrixVersions,
+  listProjectRagDocs,
   listProjects,
   listTenants,
+  retryProjectRagDoc,
+  type ProjectRagDoc,
+  type ProjectRagSummary,
+  type RagDocSyncStatus,
   updateProject,
   updateTenant,
   uploadImage,
@@ -92,9 +99,16 @@ const normalizeUuidParam = (value: unknown) => {
   return match ? match[0] : "";
 };
 
+type WorkspaceSection = "matrix" | "rag";
+type RagStatusFilter = "all" | RagDocSyncStatus;
+
+const normalizeSectionParam = (value: unknown): WorkspaceSection =>
+  String(value || "").toLowerCase() === "rag" ? "rag" : "matrix";
+
 const showWorkspaceModal = ref(false);
 const workspaceTenantId = ref("");
 const workspaceProjectId = ref("");
+const workspaceSection = ref<WorkspaceSection>("matrix");
 
 const matrixCallType = ref<MatrixCallType>("inbound");
 const matrixVersions = ref<MatrixVersion[]>([]);
@@ -133,6 +147,42 @@ const canUseInboundMatrix = computed(() =>
 const canUseOutboundMatrix = computed(() =>
   Boolean(activeProject.value?.supportsOutbound),
 );
+const workspaceSectionTabs: Array<{ value: WorkspaceSection; label: string }> = [
+  { value: "matrix", label: "QA Evaluation Matrix" },
+  { value: "rag", label: "Knowledge Base Docs" },
+];
+
+const ragSummary = ref<ProjectRagSummary | null>(null);
+const ragDocs = ref<ProjectRagDoc[]>([]);
+const ragStatusFilter = ref<RagStatusFilter>("all");
+const ragLoading = ref(false);
+const ragSummaryLoading = ref(false);
+const ragError = ref("");
+const ragNextCursor = ref<string | null>(null);
+const ragCurrentCursor = ref<string | null>(null);
+const ragCursorHistory = ref<Array<string | null>>([]);
+const ragPageSize = 20;
+const ragStatusOptions: Array<{ value: RagStatusFilter; label: string }> = [
+  { value: "all", label: "All Statuses" },
+  { value: "pending", label: "Pending" },
+  { value: "synced", label: "Synced" },
+  { value: "failed", label: "Failed" },
+  { value: "deleted", label: "Deleted" },
+];
+
+const formatDateTime = (value: string | null) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString();
+};
+
+const truncateText = (value: string, max = 120) => {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}...`;
+};
 
 const jsonFileInput = ref<HTMLInputElement | null>(null);
 
@@ -396,6 +446,7 @@ const openTenantWorkspace = async (tenant: Tenant) => {
   workspaceTenantId.value = tenant.id;
   setTenantId(tenant.id);
   showWorkspaceModal.value = true;
+  workspaceSection.value = normalizeSectionParam(route.query.section);
 
   if (!projectsByTenant.value[tenant.id]) {
     await loadProjectsForTenant(tenant.id);
@@ -410,6 +461,13 @@ const openTenantWorkspace = async (tenant: Tenant) => {
 const closeWorkspaceModal = () => {
   showWorkspaceModal.value = false;
   matrixError.value = "";
+  workspaceSection.value = "matrix";
+  ragSummary.value = null;
+  ragDocs.value = [];
+  ragError.value = "";
+  ragNextCursor.value = null;
+  ragCurrentCursor.value = null;
+  ragCursorHistory.value = [];
   void clearWorkspaceParams();
 };
 
@@ -427,6 +485,7 @@ const syncUrlWithWorkspace = async () => {
     query: {
       tenant: workspaceTenantId.value || undefined,
       project: workspaceProjectId.value || undefined,
+      section: workspaceSection.value || undefined,
     },
   });
   syncingRoute.value = false;
@@ -472,11 +531,11 @@ const applyDominantLogoColor = (event: Event) => {
     let bSum = 0;
     let count = 0;
     for (let i = 0; i < data.length; i += 4) {
-      const alpha = data[i + 3];
+      const alpha = data[i + 3] ?? 0;
       if (alpha < 40) continue;
-      rSum += data[i];
-      gSum += data[i + 1];
-      bSum += data[i + 2];
+      rSum += data[i] ?? 0;
+      gSum += data[i + 1] ?? 0;
+      bSum += data[i + 2] ?? 0;
       count += 1;
     }
     if (!count) return;
@@ -499,6 +558,7 @@ const clearWorkspaceParams = async () => {
 const openWorkspaceById = async (
   tenantId: string,
   preferredProjectId?: string,
+  preferredSection?: WorkspaceSection,
 ) => {
   const tenant = tenants.value.find((item) => item.id === tenantId);
   if (!tenant) return;
@@ -506,6 +566,7 @@ const openWorkspaceById = async (
   workspaceTenantId.value = tenant.id;
   setTenantId(tenant.id);
   showWorkspaceModal.value = true;
+  workspaceSection.value = preferredSection || "matrix";
 
   if (!projectsByTenant.value[tenant.id]) {
     await loadProjectsForTenant(tenant.id);
@@ -517,6 +578,107 @@ const openWorkspaceById = async (
   );
   workspaceProjectId.value = selectedProject?.id || list[0]?.id || "";
   setProjectId(workspaceProjectId.value);
+};
+
+const switchWorkspaceSection = async (section: WorkspaceSection) => {
+  if (workspaceSection.value === section) return;
+  workspaceSection.value = section;
+  await syncUrlWithWorkspace();
+};
+
+const resetRagPaging = () => {
+  ragNextCursor.value = null;
+  ragCurrentCursor.value = null;
+  ragCursorHistory.value = [];
+};
+
+const loadRagData = async (options?: { resetPaging?: boolean }) => {
+  if (!workspaceTenantId.value || !workspaceProjectId.value) {
+    ragSummary.value = null;
+    ragDocs.value = [];
+    resetRagPaging();
+    return;
+  }
+  if (options?.resetPaging) {
+    resetRagPaging();
+  }
+
+  ragError.value = "";
+  ragLoading.value = true;
+  ragSummaryLoading.value = true;
+  try {
+    const [summary, page] = await Promise.all([
+      getProjectRagSummary(workspaceTenantId.value, workspaceProjectId.value),
+      listProjectRagDocs(workspaceTenantId.value, workspaceProjectId.value, {
+        status: ragStatusFilter.value === "all" ? undefined : ragStatusFilter.value,
+        limit: ragPageSize,
+        cursor: ragCurrentCursor.value || undefined,
+      }),
+    ]);
+    ragSummary.value = summary;
+    ragDocs.value = page.items;
+    ragNextCursor.value = page.nextCursor;
+  } catch (error) {
+    ragError.value =
+      error instanceof Error ? error.message : "Failed to load RAG documents";
+    ragSummary.value = null;
+    ragDocs.value = [];
+    ragNextCursor.value = null;
+  } finally {
+    ragLoading.value = false;
+    ragSummaryLoading.value = false;
+  }
+};
+
+const goToNextRagPage = async () => {
+  if (!ragNextCursor.value) return;
+  ragCursorHistory.value.push(ragCurrentCursor.value);
+  ragCurrentCursor.value = ragNextCursor.value;
+  await loadRagData();
+};
+
+const goToPreviousRagPage = async () => {
+  if (!ragCursorHistory.value.length) return;
+  const previousCursor = ragCursorHistory.value.pop() ?? null;
+  ragCurrentCursor.value = previousCursor;
+  await loadRagData();
+};
+
+const deleteRagDocAction = (doc: ProjectRagDoc) => {
+  if (!workspaceTenantId.value || !workspaceProjectId.value) return;
+  requestConfirm(
+    "Delete Knowledge Base Doc",
+    `Delete "${doc.fileName}" from this project's knowledge base?`,
+    async () => {
+      await deleteProjectRagDoc(
+        workspaceTenantId.value,
+        workspaceProjectId.value,
+        doc.id,
+      );
+      toast.success("Knowledge base document deleted");
+      await loadRagData({ resetPaging: true });
+    },
+  );
+};
+
+const retryRagDocAction = async (doc: ProjectRagDoc) => {
+  if (!workspaceTenantId.value || !workspaceProjectId.value) return;
+  try {
+    ragLoading.value = true;
+    await retryProjectRagDoc(
+      workspaceTenantId.value,
+      workspaceProjectId.value,
+      doc.id,
+    );
+    toast.success("RAG document queued for retry");
+    await loadRagData({ resetPaging: true });
+  } catch (error) {
+    toast.error(
+      error instanceof Error ? error.message : "Failed to retry RAG document",
+    );
+  } finally {
+    ragLoading.value = false;
+  }
 };
 
 const openEditTenantModal = (tenant: Tenant) => {
@@ -959,9 +1121,21 @@ const saveDraftAction = () => {
   });
 };
 
-watch([workspaceProjectId, matrixCallType], async () => {
-  if (showWorkspaceModal.value) {
+watch([workspaceProjectId, matrixCallType, workspaceSection], async () => {
+  if (showWorkspaceModal.value && workspaceSection.value === "matrix") {
     await loadMatrixVersions();
+  }
+});
+
+watch([workspaceProjectId, workspaceSection], async () => {
+  if (showWorkspaceModal.value && workspaceSection.value === "rag") {
+    await loadRagData({ resetPaging: true });
+  }
+});
+
+watch(ragStatusFilter, async () => {
+  if (showWorkspaceModal.value && workspaceSection.value === "rag") {
+    await loadRagData({ resetPaging: true });
   }
 });
 
@@ -971,18 +1145,24 @@ watch(
     if (syncingRoute.value) return;
     const tenantQuery = normalizeUuidParam(query.tenant);
     const projectQuery = normalizeUuidParam(query.project);
+    const sectionQuery = normalizeSectionParam(query.section);
 
     if (!tenantQuery) {
       showWorkspaceModal.value = false;
       workspaceTenantId.value = "";
       workspaceProjectId.value = "";
-      if (query.tenant || query.project) {
+      workspaceSection.value = "matrix";
+      if (query.tenant || query.project || query.section) {
         await clearWorkspaceParams();
       }
       return;
     }
 
-    await openWorkspaceById(tenantQuery, projectQuery || undefined);
+    await openWorkspaceById(
+      tenantQuery,
+      projectQuery || undefined,
+      sectionQuery,
+    );
   },
 );
 
@@ -991,8 +1171,13 @@ onMounted(async () => {
   resetMatrixDraft();
   const tenantQuery = normalizeUuidParam(route.query.tenant);
   const projectQuery = normalizeUuidParam(route.query.project);
+  const sectionQuery = normalizeSectionParam(route.query.section);
   if (tenantQuery) {
-    await openWorkspaceById(tenantQuery, projectQuery || undefined);
+    await openWorkspaceById(
+      tenantQuery,
+      projectQuery || undefined,
+      sectionQuery,
+    );
   }
 
   // Close versions dropdown menu when clicking outside
@@ -1309,221 +1494,385 @@ onMounted(async () => {
           </aside>
 
           <section class="matrix-panel">
-            <div class="matrix-head">
-              <div>
-                <p class="panel-title">QA Evaluation Matrix</p>
-                <p class="msg-muted" v-if="activeProject">
-                  Project: {{ activeProject.name }}
-                  <span
-                    class="policy-badge"
-                    :class="
-                      activeProject.ceScoringPolicy === 'weighted_ce_independent'
-                        ? 'policy-badge-weighted'
-                        : 'policy-badge-strict'
-                    "
-                  >
-                    {{
-                      activeProject.ceScoringPolicy === "weighted_ce_independent"
-                        ? "CE Weighted"
-                        : "CE Strict"
-                    }}
-                  </span>
-                </p>
-              </div>
-              <div class="toggle-row">
-                <button
-                  class="btn-ghost"
-                  :class="{ 'btn-toggle-active': matrixCallType === 'inbound' }"
-                  :disabled="!canUseInboundMatrix"
-                  @click="matrixCallType = 'inbound'"
-                >
-                  Inbound
-                </button>
-                <button
-                  class="btn-ghost"
-                  :class="{
-                    'btn-toggle-active': matrixCallType === 'outbound',
-                  }"
-                  :disabled="!canUseOutboundMatrix"
-                  @click="matrixCallType = 'outbound'"
-                >
-                  Outbound
-                </button>
-              </div>
-            </div>
+            <nav class="workspace-tabs" aria-label="Workspace section tabs">
+              <button
+                v-for="tab in workspaceSectionTabs"
+                :key="tab.value"
+                class="workspace-tab"
+                :class="{ 'workspace-tab-active': workspaceSection === tab.value }"
+                @click="switchWorkspaceSection(tab.value)"
+              >
+                {{ tab.label }}
+              </button>
+            </nav>
 
-            <p v-if="!activeProject" class="msg-muted">
-              Select a project to manage matrix.
-            </p>
-            <p v-else-if="matrixError" class="msg-error">{{ matrixError }}</p>
-            <p v-else-if="matrixLoading" class="msg-muted">
-              Loading versions...
-            </p>
-
-            <div v-if="activeProject" class="matrix-layout">
-              <div class="version-panel">
-                <div class="version-panel-head">
-                  <p class="panel-title">Versions</p>
-                  <button
-                    class="btn-primary btn-sm"
-                    :disabled="matrixBusy"
-                    @click="createMatrixVersionAction"
-                  >
-                    + Create
-                  </button>
-                </div>
-                <div v-if="!matrixVersions.length" class="msg-muted">
-                  No versions yet.
-                </div>
-                <div v-else class="version-list">
-                  <div
-                    v-for="version in matrixVersions"
-                    :key="version.id"
-                    class="matrix-version-row-wrapper"
-                  >
-                    <button
-                      class="matrix-version-row"
-                      :class="{
-                        'matrix-version-row-active':
-                          selectedMatrixVersionId === version.id,
-                      }"
-                      @click="selectMatrixVersionAction(version.id)"
-                    >
-                      <span>v{{ version.versionNumber }}</span>
-                      <div
-                        style="display: flex; align-items: center; gap: 0.4rem"
-                      >
-                        <span v-if="version.isActive" class="matrix-badge"
-                          >Active</span
-                        >
-                        <div class="menu-container" @click.stop>
-                          <button
-                            class="btn-icon"
-                            @click="
-                              openMenuId =
-                                openMenuId === version.id ? null : version.id
-                            "
-                          >
-                            <MoreVertical class="w-4 h-4" />
-                          </button>
-
-                          <!-- Dropdown Menu -->
-                          <div
-                            v-if="openMenuId === version.id"
-                            class="dropdown-menu"
-                          >
-                            <button
-                              class="dropdown-item"
-                              :disabled="matrixBusy || version.isActive"
-                              @click="
-                                openMenuId = null;
-                                activateMatrixVersionAction(version.id);
-                              "
-                            >
-                              Activate
-                            </button>
-                            <button
-                              class="dropdown-item text-danger"
-                              :disabled="matrixBusy || version.isActive"
-                              @click="
-                                openMenuId = null;
-                                deleteMatrixVersionAction(version.id);
-                              "
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div class="editor-panel">
-                <div class="editor-head">
-                  <div class="editor-head-left">
-                    <p class="panel-title">Evaluation Parameters</p>
-                    <span v-if="matrixDirty" class="dirty-badge"
-                      >Unsaved changes</span
-                    >
-                  </div>
-                  <div style="display: flex; gap: 0.5rem; align-items: center">
-                    <input
-                      type="file"
-                      accept=".json"
-                      class="hidden"
-                      ref="jsonFileInput"
-                      @change="handleJsonUpload"
-                    />
-                    <button class="btn-ghost" @click="triggerJsonUpload">
-                      Upload JSON
-                    </button>
-                    <button class="btn-ghost" @click="addMatrixRow">
-                      + Row
-                    </button>
-                    <button
-                      v-if="matrixDirty"
-                      class="btn-save-version"
-                      :disabled="matrixBusy"
-                      @click="saveDraftAction"
-                    >
-                      Save
-                    </button>
-                  </div>
-                </div>
-                <div class="rows-scroll">
-                  <div
-                    v-for="(row, idx) in matrixRowsDraft"
-                    :key="`row-${idx}`"
-                    class="matrix-row-grid"
-                  >
-                    <input
-                      v-model="row.area"
-                      class="input"
-                      placeholder="Area"
-                    />
-                    <select
-                      v-model="row.parameter"
-                      class="input"
-                      aria-label="CE or NCE dropdown"
-                    >
-                      <option value="CE">CE</option>
-                      <option value="NCE">NCE</option>
-                    </select>
-                    <input
-                      v-model.number="row.weight"
-                      class="input"
-                      type="number"
-                      min="1"
-                      step="1"
-                      inputmode="numeric"
-                      placeholder="Weight"
-                      @keydown="
-                        (e) =>
-                          ['e', 'E', '+', '-', '.'].includes(e.key) &&
-                          e.preventDefault()
+            <template v-if="workspaceSection === 'matrix'">
+              <div class="matrix-head">
+                <div>
+                  <p class="panel-title">QA Evaluation Matrix</p>
+                  <p class="msg-muted" v-if="activeProject">
+                    Project: {{ activeProject.name }}
+                    <span
+                      class="policy-badge"
+                      :class="
+                        activeProject.ceScoringPolicy === 'weighted_ce_independent'
+                          ? 'policy-badge-weighted'
+                          : 'policy-badge-strict'
                       "
-                    />
-                    <button
-                      class="btn-edit-conditions"
-                      :class="{ 'has-content': row.description?.trim() }"
-                      @click="conditionEditIdx = idx"
-                      :title="row.description || 'No conditions set'"
                     >
                       {{
-                        row.description?.trim()
-                          ? "Edit Conditions ✎"
-                          : "Add Conditions ＋"
+                        activeProject.ceScoringPolicy === "weighted_ce_independent"
+                          ? "CE Weighted"
+                          : "CE Strict"
                       }}
+                    </span>
+                  </p>
+                </div>
+                <div class="toggle-row">
+                  <button
+                    class="btn-ghost"
+                    :class="{ 'btn-toggle-active': matrixCallType === 'inbound' }"
+                    :disabled="!canUseInboundMatrix"
+                    @click="matrixCallType = 'inbound'"
+                  >
+                    Inbound
+                  </button>
+                  <button
+                    class="btn-ghost"
+                    :class="{ 'btn-toggle-active': matrixCallType === 'outbound' }"
+                    :disabled="!canUseOutboundMatrix"
+                    @click="matrixCallType = 'outbound'"
+                  >
+                    Outbound
+                  </button>
+                </div>
+              </div>
+
+              <p v-if="!activeProject" class="msg-muted">
+                Select a project to manage matrix.
+              </p>
+              <p v-else-if="matrixError" class="msg-error">{{ matrixError }}</p>
+              <p v-else-if="matrixLoading" class="msg-muted">
+                Loading versions...
+              </p>
+
+              <div v-if="activeProject" class="matrix-layout">
+                <div class="version-panel">
+                  <div class="version-panel-head">
+                    <p class="panel-title">Versions</p>
+                    <button
+                      class="btn-primary btn-sm"
+                      :disabled="matrixBusy"
+                      @click="createMatrixVersionAction"
+                    >
+                      + Create
                     </button>
-                    <button class="btn-danger" @click="removeMatrixRow(idx)">
-                      Remove
-                    </button>
+                  </div>
+                  <div v-if="!matrixVersions.length" class="msg-muted">
+                    No versions yet.
+                  </div>
+                  <div v-else class="version-list">
+                    <div
+                      v-for="version in matrixVersions"
+                      :key="version.id"
+                      class="matrix-version-row-wrapper"
+                    >
+                      <button
+                        class="matrix-version-row"
+                        :class="{
+                          'matrix-version-row-active':
+                            selectedMatrixVersionId === version.id,
+                        }"
+                        @click="selectMatrixVersionAction(version.id)"
+                      >
+                        <span>v{{ version.versionNumber }}</span>
+                        <div
+                          style="display: flex; align-items: center; gap: 0.4rem"
+                        >
+                          <span v-if="version.isActive" class="matrix-badge"
+                            >Active</span
+                          >
+                          <div class="menu-container" @click.stop>
+                            <button
+                              class="btn-icon"
+                              @click="
+                                openMenuId =
+                                  openMenuId === version.id ? null : version.id
+                              "
+                            >
+                              <MoreVertical class="w-4 h-4" />
+                            </button>
+
+                            <div
+                              v-if="openMenuId === version.id"
+                              class="dropdown-menu"
+                            >
+                              <button
+                                class="dropdown-item"
+                                :disabled="matrixBusy || version.isActive"
+                                @click="
+                                  openMenuId = null;
+                                  activateMatrixVersionAction(version.id);
+                                "
+                              >
+                                Activate
+                              </button>
+                              <button
+                                class="dropdown-item text-danger"
+                                :disabled="matrixBusy || version.isActive"
+                                @click="
+                                  openMenuId = null;
+                                  deleteMatrixVersionAction(version.id);
+                                "
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="editor-panel">
+                  <div class="editor-head">
+                    <div class="editor-head-left">
+                      <p class="panel-title">Evaluation Parameters</p>
+                      <span v-if="matrixDirty" class="dirty-badge"
+                        >Unsaved changes</span
+                      >
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; align-items: center">
+                      <input
+                        type="file"
+                        accept=".json"
+                        class="hidden"
+                        ref="jsonFileInput"
+                        @change="handleJsonUpload"
+                      />
+                      <button class="btn-ghost" @click="triggerJsonUpload">
+                        Upload JSON
+                      </button>
+                      <button class="btn-ghost" @click="addMatrixRow">
+                        + Row
+                      </button>
+                      <button
+                        v-if="matrixDirty"
+                        class="btn-save-version"
+                        :disabled="matrixBusy"
+                        @click="saveDraftAction"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                  <div class="rows-scroll">
+                    <div
+                      v-for="(row, idx) in matrixRowsDraft"
+                      :key="`row-${idx}`"
+                      class="matrix-row-grid"
+                    >
+                      <input
+                        v-model="row.area"
+                        class="input"
+                        placeholder="Area"
+                      />
+                      <select
+                        v-model="row.parameter"
+                        class="input"
+                        aria-label="CE or NCE dropdown"
+                      >
+                        <option value="CE">CE</option>
+                        <option value="NCE">NCE</option>
+                      </select>
+                      <input
+                        v-model.number="row.weight"
+                        class="input"
+                        type="number"
+                        min="1"
+                        step="1"
+                        inputmode="numeric"
+                        placeholder="Weight"
+                        @keydown="
+                          (e) =>
+                            ['e', 'E', '+', '-', '.'].includes(e.key) &&
+                            e.preventDefault()
+                        "
+                      />
+                      <button
+                        class="btn-edit-conditions"
+                        :class="{ 'has-content': row.description?.trim() }"
+                        @click="conditionEditIdx = idx"
+                        :title="row.description || 'No conditions set'"
+                      >
+                        {{
+                          row.description?.trim()
+                            ? "Edit Conditions ✎"
+                            : "Add Conditions ＋"
+                        }}
+                      </button>
+                      <button class="btn-danger" @click="removeMatrixRow(idx)">
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            </template>
+
+            <template v-else>
+              <div class="rag-head">
+                <div>
+                  <p class="panel-title">Knowledge Base Docs</p>
+                  <p class="msg-muted" v-if="activeProject">
+                    Project: {{ activeProject.name }}
+                  </p>
+                </div>
+                <div v-if="activeProject" class="rag-controls">
+                  <select v-model="ragStatusFilter" class="input rag-filter-select">
+                    <option
+                      v-for="opt in ragStatusOptions"
+                      :key="opt.value"
+                      :value="opt.value"
+                    >
+                      {{ opt.label }}
+                    </option>
+                  </select>
+                  <button
+                    class="btn-ghost"
+                    :disabled="ragLoading"
+                    @click="loadRagData({ resetPaging: true })"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              <p v-if="!activeProject" class="msg-muted">
+                Select a project to manage knowledge base docs.
+              </p>
+              <template v-else>
+                <div class="rag-summary-card">
+                  <p v-if="ragSummaryLoading && !ragSummary" class="msg-muted">
+                    Loading summary...
+                  </p>
+                  <div v-else-if="ragSummary" class="rag-summary-grid">
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Collection ID</span>
+                      <span class="rag-summary-value">
+                        {{ ragSummary.collectionId || "-" }}
+                      </span>
+                    </p>
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Last Synced</span>
+                      <span class="rag-summary-value">
+                        {{ formatDateTime(ragSummary.lastSyncedAt) }}
+                      </span>
+                    </p>
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Pending</span>
+                      <span class="rag-summary-value">{{ ragSummary.counts.pending }}</span>
+                    </p>
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Synced</span>
+                      <span class="rag-summary-value">{{ ragSummary.counts.synced }}</span>
+                    </p>
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Failed</span>
+                      <span class="rag-summary-value">{{ ragSummary.counts.failed }}</span>
+                    </p>
+                    <p class="rag-summary-item">
+                      <span class="rag-summary-label">Deleted</span>
+                      <span class="rag-summary-value">{{ ragSummary.counts.deleted }}</span>
+                    </p>
+                  </div>
+                </div>
+
+                <p v-if="ragError" class="msg-error">{{ ragError }}</p>
+                <p v-else-if="ragLoading && !ragDocs.length" class="msg-muted">
+                  Loading documents...
+                </p>
+                <p v-else-if="!ragDocs.length" class="msg-muted rag-empty">
+                  No documents found for this project and filter.
+                </p>
+                <div v-else class="rag-table-wrap">
+                  <table class="rag-table">
+                    <thead>
+                      <tr>
+                        <th>File Name</th>
+                        <th>Parameter / Row</th>
+                        <th>Score Delta</th>
+                        <th>Reason</th>
+                        <th>Status</th>
+                        <th>Uploaded</th>
+                        <th>Created</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="doc in ragDocs" :key="doc.id">
+                        <td class="rag-cell-main">{{ doc.fileName }}</td>
+                        <td>{{ doc.parameter }} / #{{ doc.rowIndex }}</td>
+                        <td>{{ doc.oldScore }} -> {{ doc.newScore }} / {{ doc.maxScore }}</td>
+                        <td class="rag-reason" :title="doc.reasonNote">
+                          {{ truncateText(doc.reasonNote, 110) }}
+                        </td>
+                        <td>
+                          <button
+                            v-if="doc.syncStatus === 'failed'"
+                            class="rag-status-badge rag-status-failed rag-retry-badge"
+                            :disabled="ragLoading"
+                            @click="retryRagDocAction(doc)"
+                            title="Retry sync"
+                          >
+                            <span>{{ doc.syncStatus }}</span>
+                            <RotateCcw class="w-3 h-3" />
+                          </button>
+                          <span
+                            v-else
+                            class="rag-status-badge"
+                            :class="`rag-status-${doc.syncStatus}`"
+                          >
+                            {{ doc.syncStatus }}
+                          </span>
+                        </td>
+                        <td>{{ formatDateTime(doc.uploadedAt) }}</td>
+                        <td>{{ formatDateTime(doc.createdAt) }}</td>
+                        <td>
+                          <button
+                            v-if="doc.syncStatus !== 'deleted'"
+                            class="btn-danger btn-sm"
+                            :disabled="ragLoading"
+                            @click="deleteRagDocAction(doc)"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="rag-pagination">
+                  <button
+                    class="btn-ghost btn-sm"
+                    :disabled="ragLoading || !ragCursorHistory.length"
+                    @click="goToPreviousRagPage"
+                  >
+                    Previous
+                  </button>
+                  <p class="msg-muted">Page {{ ragCursorHistory.length + 1 }}</p>
+                  <button
+                    class="btn-ghost btn-sm"
+                    :disabled="ragLoading || !ragNextCursor"
+                    @click="goToNextRagPage"
+                  >
+                    Next
+                  </button>
+                </div>
+              </template>
+            </template>
           </section>
         </div>
       </div>
@@ -1903,6 +2252,35 @@ onMounted(async () => {
   overflow-y: auto;
 }
 
+.workspace-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.85rem;
+}
+
+.workspace-tab {
+  border-radius: 0.62rem;
+  padding: 0.45rem 0.82rem;
+  color: #94a3b8;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.65);
+}
+
+.workspace-tab-active {
+  color: #082f49;
+  border-color: transparent;
+  background: linear-gradient(
+    180deg,
+    rgba(34, 211, 238, 0.95),
+    rgba(6, 182, 212, 0.9)
+  );
+}
+
 .panel-title {
   color: #f8fafc;
   font-size: 0.78rem;
@@ -1973,6 +2351,156 @@ onMounted(async () => {
   justify-content: space-between;
   align-items: flex-start;
   gap: 0.7rem;
+}
+
+.rag-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.rag-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rag-filter-select {
+  min-width: 150px;
+}
+
+.rag-summary-card {
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  border-radius: 0.9rem;
+  background: rgba(15, 23, 42, 0.45);
+  padding: 0.75rem;
+  margin-bottom: 0.7rem;
+}
+
+.rag-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.55rem;
+}
+
+.rag-summary-item {
+  border: 1px solid rgba(100, 116, 139, 0.32);
+  border-radius: 0.65rem;
+  background: rgba(2, 6, 23, 0.45);
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.rag-summary-label {
+  color: #94a3b8;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.rag-summary-value {
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  word-break: break-word;
+}
+
+.rag-empty {
+  margin-top: 0.6rem;
+}
+
+.rag-table-wrap {
+  margin-top: 0.65rem;
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  border-radius: 0.9rem;
+  overflow: auto;
+}
+
+.rag-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 840px;
+}
+
+.rag-table th,
+.rag-table td {
+  text-align: left;
+  padding: 0.55rem;
+  font-size: 0.75rem;
+  border-bottom: 1px solid rgba(100, 116, 139, 0.28);
+}
+
+.rag-table th {
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.55);
+  position: sticky;
+  top: 0;
+}
+
+.rag-table td {
+  color: #dbeafe;
+}
+
+.rag-cell-main {
+  max-width: 260px;
+  word-break: break-word;
+}
+
+.rag-reason {
+  max-width: 240px;
+  word-break: break-word;
+}
+
+.rag-status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  color: #cbd5e1;
+}
+
+.rag-status-pending {
+  border-color: rgba(251, 191, 36, 0.55);
+  color: #fde68a;
+}
+
+.rag-status-synced {
+  border-color: rgba(74, 222, 128, 0.6);
+  color: #bbf7d0;
+}
+
+.rag-status-failed {
+  border-color: rgba(248, 113, 113, 0.58);
+  color: #fecaca;
+}
+
+.rag-retry-badge {
+  gap: 0.28rem;
+}
+
+.rag-retry-badge:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.rag-status-deleted {
+  border-color: rgba(148, 163, 184, 0.5);
+  color: #cbd5e1;
+}
+
+.rag-pagination {
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 .toggle-row {
@@ -2319,6 +2847,11 @@ onMounted(async () => {
   );
 }
 
+.btn-sm {
+  padding: 0.34rem 0.56rem;
+  font-size: 0.7rem;
+}
+
 .btn-ghost {
   padding: 0.45rem 0.7rem;
   border-radius: 0.55rem;
@@ -2392,6 +2925,19 @@ onMounted(async () => {
 
   .matrix-row-grid {
     grid-template-columns: 1fr;
+  }
+
+  .rag-head {
+    flex-direction: column;
+  }
+
+  .rag-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .rag-pagination {
+    justify-content: space-between;
   }
 }
 </style>

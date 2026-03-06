@@ -9,10 +9,13 @@ import {
 
 const elevenlabsApiKey = ref("");
 const xaiApiKey = ref("");
+const xaiManagementApiKey = ref("");
 const xaiModel = ref("grok-4-1-fast-non-reasoning");
+const xaiRagModel = ref("grok-4-1-fast-reasoning");
 
 const hasElevenlabs = ref(false);
 const hasXai = ref(false);
+const hasXaiManagement = ref(false);
 const isSaving = ref(false);
 const isResettingQaHistory = ref(false);
 
@@ -21,7 +24,9 @@ const load = async () => {
     const global = await getGlobalSettings();
     hasElevenlabs.value = global.hasElevenlabsApiKey;
     hasXai.value = global.hasXaiApiKey;
+    hasXaiManagement.value = global.hasXaiManagementApiKey;
     xaiModel.value = global.xaiModel;
+    xaiRagModel.value = global.xaiRagModel;
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "Failed to load system settings");
   }
@@ -30,16 +35,35 @@ const load = async () => {
 const save = async () => {
   isSaving.value = true;
   try {
-    const result = await updateGlobalSettings({
-      elevenlabsApiKey: elevenlabsApiKey.value,
-      xaiApiKey: xaiApiKey.value,
+    const payload: {
+      elevenlabsApiKey?: string;
+      xaiApiKey?: string;
+      xaiManagementApiKey?: string;
+      xaiModel?: string;
+      xaiRagModel?: string;
+    } = {
       xaiModel: xaiModel.value,
-    });
+      xaiRagModel: xaiRagModel.value,
+    };
+    if (elevenlabsApiKey.value.trim()) {
+      payload.elevenlabsApiKey = elevenlabsApiKey.value.trim();
+    }
+    if (xaiApiKey.value.trim()) {
+      payload.xaiApiKey = xaiApiKey.value.trim();
+    }
+    if (xaiManagementApiKey.value.trim()) {
+      payload.xaiManagementApiKey = xaiManagementApiKey.value.trim();
+    }
+
+    const result = await updateGlobalSettings(payload);
     hasElevenlabs.value = result.hasElevenlabsApiKey;
     hasXai.value = result.hasXaiApiKey;
+    hasXaiManagement.value = result.hasXaiManagementApiKey;
     xaiModel.value = result.xaiModel;
+    xaiRagModel.value = result.xaiRagModel;
     elevenlabsApiKey.value = "";
     xaiApiKey.value = "";
+    xaiManagementApiKey.value = "";
     toast.success("System settings updated");
   } catch (error) {
     toast.error(error instanceof Error ? error.message : "Failed to save system settings");
@@ -98,9 +122,27 @@ onMounted(() => {
       </div>
 
       <div class="field-card wide">
-        <label class="label">xAI Model</label>
+        <label class="label">xAI Management API Key</label>
+        <input
+          v-model="xaiManagementApiKey"
+          type="password"
+          class="input"
+          placeholder="Paste to update"
+        />
+        <p class="meta">Saved: {{ hasXaiManagement ? "Yes" : "No" }}</p>
+      </div>
+
+      <div class="field-card wide">
+        <label class="label">xAI Scoring Model</label>
         <div class="row">
           <input v-model="xaiModel" type="text" class="input grow" />
+        </div>
+      </div>
+
+      <div class="field-card wide">
+        <label class="label">xAI RAG Model</label>
+        <div class="row">
+          <input v-model="xaiRagModel" type="text" class="input grow" />
           <button @click="save" :disabled="isSaving" class="btn-primary">
             {{ isSaving ? "Saving..." : "Save" }}
           </button>
