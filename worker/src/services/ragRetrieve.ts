@@ -52,7 +52,8 @@ Keluarkan hasil ringkas berupa 5-10 bullet poin dalam Bahasa Indonesia.
 Fokus pada:
 1) kondisi yang membuat skor harus 0
 2) bukti percakapan yang biasanya mendukung keputusan
-3) area rawan salah-skor.
+3) area rawan salah-skor
+4) pengecualian atau perilaku yang DIIZINKAN (contoh: boleh sebut X tanpa Y).
 
 Jangan ulangi metadata internal. Jangan beri jawaban panjang.`,
       tools: {

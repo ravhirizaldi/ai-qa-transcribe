@@ -1,13 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router";
-import LoginPage from "../pages/LoginPage.vue";
-import ManagePage from "../pages/ManagePage.vue";
-import BatchQAPage from "../pages/BatchQAPage.vue";
-import SettingsLayoutPage from "../pages/settings/SettingsLayoutPage.vue";
-import UsersSettingsPage from "../pages/settings/UsersSettingsPage.vue";
-import RolesSettingsPage from "../pages/settings/RolesSettingsPage.vue";
-import SystemSettingsPage from "../pages/settings/SystemSettingsPage.vue";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:3001";
+import { getAuthMeCached } from "../services/backendApi";
 
 const canAccessManageFromPermissions = (permissions: Set<string>) => {
   return (
@@ -34,19 +26,32 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", redirect: "/batch" },
-    { path: "/login", component: LoginPage, meta: { public: true } },
-    { path: "/manage", component: ManagePage },
+    {
+      path: "/login",
+      component: () => import("../pages/LoginPage.vue"),
+      meta: { public: true },
+    },
+    { path: "/manage", component: () => import("../pages/ManagePage.vue") },
     {
       path: "/settings",
-      component: SettingsLayoutPage,
+      component: () => import("../pages/settings/SettingsLayoutPage.vue"),
       children: [
         { path: "", redirect: "/settings/users" },
-        { path: "users", component: UsersSettingsPage },
-        { path: "roles", component: RolesSettingsPage },
-        { path: "system", component: SystemSettingsPage },
+        {
+          path: "users",
+          component: () => import("../pages/settings/UsersSettingsPage.vue"),
+        },
+        {
+          path: "roles",
+          component: () => import("../pages/settings/RolesSettingsPage.vue"),
+        },
+        {
+          path: "system",
+          component: () => import("../pages/settings/SystemSettingsPage.vue"),
+        },
       ],
     },
-    { path: "/batch", component: BatchQAPage },
+    { path: "/batch", component: () => import("../pages/BatchQAPage.vue") },
   ],
 });
 
@@ -64,14 +69,7 @@ router.beforeEach(async (to) => {
 
   if (token && (to.path.startsWith("/settings") || to.path.startsWith("/manage"))) {
     try {
-      const response = await fetch(`${API_BASE}/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!response.ok) return "/batch";
-      const me = (await response.json()) as {
-        isRestricted?: unknown;
-        permissions?: unknown;
-      };
+      const me = await getAuthMeCached();
       const isRestricted = me.isRestricted === true;
       const permissions = new Set(
         Array.isArray(me.permissions)

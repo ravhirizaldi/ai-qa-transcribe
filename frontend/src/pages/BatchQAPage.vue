@@ -17,6 +17,25 @@ import AudioUploader from "../components/AudioUploader.vue";
 import AnalysisPanel from "../components/AnalysisPanel.vue";
 import TranscriptViewer from "../components/TranscriptViewer.vue";
 import {
+  canDeleteBatch as canDeleteBatchItem,
+  defaultBatchName,
+  loadBatchNameMap,
+  persistBatchNameMap,
+  resolveBatchDisplayName,
+} from "../composables/useBatchHistory";
+import {
+  runWithConcurrency,
+  toTranscriptSegments,
+} from "../composables/useJobDetail";
+import {
+  hasMissingScoreNotes as hasMissingScoreNotesInEdits,
+  hasScoreChanges as hasScoreChangesInEdits,
+} from "../composables/useScoreEditing";
+import {
+  getRealtimePollingInterval,
+  isRealtimeJobEvent,
+} from "../composables/useBatchRealtime";
+import {
   analyzeBatchNow,
   connectWs,
   createProjectBatch,
@@ -24,7 +43,8 @@ import {
   deleteJob,
   getBatch,
   getJob,
-  getJobAudioUrl,
+  getJobAudioBlobUrl,
+  getProjectBatchSummary,
   listJobScoreHistory,
   getActiveMatrixVersion,
   listProjectBatches,
@@ -33,7 +53,8 @@ import {
   retryJob,
   updateJobScores,
   uploadBatchFiles,
-  getAuthMe,
+  updateBatchName,
+  getAuthMeCached,
   subscribeBatch,
   subscribeJob,
   type BatchHistoryItem,
@@ -115,15 +136,28 @@ let confirmAction: null | (() => Promise<void>) = null;
 
 let ws: WebSocket | null = null;
 let pollTimer: number | null = null;
+let batchRefreshTimer: number | null = null;
 let realtimeBatchId = "";
 let isWsConnected = false;
+let hasStableWsConnection = false;
+let selectedJobAudioAbortController: AbortController | null = null;
+let selectedJobAudioRequestId = 0;
+let suppressSelectedJobWatcher = false;
+const JOB_HYDRATION_CONCURRENCY = 5;
+const hydratingJobIds = new Set<string>();
 
 const batchNamesById = ref<Record<string, string>>({});
 const BATCH_NAME_KEY = "qa_batch_names_v1";
+const syncedBatchNameIds = new Set<string>();
 const apiBaseUrl = (
   import.meta.env.VITE_API_BASE_URL || "http://localhost:3001"
 ).replace(/\/$/, "");
 const logoBgColors = ref<Record<string, string>>({});
+const isDev = import.meta.env.DEV;
+const debugError = (...args: unknown[]) => {
+  if (!isDev) return;
+  console.error(...args);
+};
 
 const resolveTenantLogoUrl = (logoUrl?: string | null) => {
   if (!logoUrl) return "";
@@ -222,31 +256,16 @@ const selectedJobMeta = computed(
 );
 const transcriptSegments = computed(() => {
   const segments = selectedJobDetail.value?.segments || [];
-  return segments.map((seg: any) => ({
-    start: seg.startSec,
-    end: seg.endSec,
-    text: seg.rawText,
-    speakerId: seg.speakerId,
-    role: seg.role,
-    cleaned_text: seg.cleanedText,
-    words: seg.wordsJson || [],
-  }));
+  return toTranscriptSegments(segments as any[]);
 });
 const resultScoreRows = computed(
   () => selectedJobDetail.value?.analysis?.evaluation_table || [],
 );
 const hasScoreChanges = computed(() =>
-  resultScoreRows.value.some((row) => {
-    const draft = scoreEdits.value[row.id];
-    return draft && Number(draft.score) !== Number(row.score);
-  }),
+  hasScoreChangesInEdits(resultScoreRows.value as any, scoreEdits.value),
 );
 const hasMissingScoreNotes = computed(() =>
-  resultScoreRows.value.some((row) => {
-    const draft = scoreEdits.value[row.id];
-    if (!draft || Number(draft.score) === Number(row.score)) return false;
-    return !String(draft.note || "").trim();
-  }),
+  hasMissingScoreNotesInEdits(resultScoreRows.value as any, scoreEdits.value),
 );
 const canSubmitScoreEdits = computed(
   () =>
@@ -434,45 +453,47 @@ const normalizeUuidParam = (value: unknown) => {
     : "";
 };
 
-const defaultBatchName = () => {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `QA Batch ${y}-${m}-${d}`;
-};
-
 const loadBatchNames = () => {
-  try {
-    const raw = localStorage.getItem(BATCH_NAME_KEY);
-    batchNamesById.value = raw
-      ? (JSON.parse(raw) as Record<string, string>)
-      : {};
-  } catch {
-    batchNamesById.value = {};
-  }
+  batchNamesById.value = loadBatchNameMap(BATCH_NAME_KEY);
 };
 
 const saveBatchName = (batchId: string, name: string) => {
   batchNamesById.value = { ...batchNamesById.value, [batchId]: name.trim() };
-  localStorage.setItem(BATCH_NAME_KEY, JSON.stringify(batchNamesById.value));
+  persistBatchNameMap(BATCH_NAME_KEY, batchNamesById.value);
+};
+
+const syncCachedBatchNamesToDb = async (items: BatchHistoryItem[]) => {
+  if (!canManageJobs.value) return;
+  const pending = items.filter((item) => {
+    const dbName = String(item.name || "").trim();
+    if (dbName) return false;
+    const cachedName = String(batchNamesById.value[item.id] || "").trim();
+    if (!cachedName) return false;
+    return !syncedBatchNameIds.has(item.id);
+  });
+
+  for (const item of pending) {
+    const cachedName = String(batchNamesById.value[item.id] || "").trim();
+    if (!cachedName) continue;
+    try {
+      await updateBatchName({ batchId: item.id, name: cachedName });
+      syncedBatchNameIds.add(item.id);
+      item.name = cachedName;
+    } catch (error) {
+      debugError("Failed to sync cached batch name to DB", {
+        batchId: item.id,
+        error,
+      });
+    }
+  }
 };
 
 const getBatchName = (batch: BatchHistoryItem) => {
-  return (
-    batchNamesById.value[batch.id] ||
-    `Batch ${new Date(batch.createdAt).toLocaleDateString()}`
-  );
+  return resolveBatchDisplayName(batch, batchNamesById.value);
 };
 
 const canDeleteBatch = (batch: BatchHistoryItem) => {
-  const readyForDelete =
-    batch.totalJobs === 0 ||
-    (batch.totalJobs > 0 &&
-      batch.completedJobs + batch.failedJobs === batch.totalJobs);
-  if (!readyForDelete) return false;
-  if (batch.isLocked && !isSuperAdmin.value) return false;
-  return true;
+  return canDeleteBatchItem(batch, isSuperAdmin.value);
 };
 
 const syncRoute = async () => {
@@ -590,6 +611,7 @@ const loadHistory = async (opts?: {
   }
   try {
     history.value = await listProjectBatches(selectedProjectId.value);
+    await syncCachedBatchNamesToDb(history.value);
     if (opts?.preserveSelection && previousSelectedBatchId) {
       const stillExists = history.value.some(
         (item) => item.id === previousSelectedBatchId,
@@ -611,6 +633,120 @@ const loadHistory = async (opts?: {
       loadingHistory.value = false;
     }
   }
+};
+
+const hydrateCompletedJobDetails = async (targetJobIds?: string[]) => {
+  const candidates = (
+    targetJobIds?.length
+      ? targetJobIds
+      : selectedBatchJobs.value
+          .filter((job) => job.status === "completed")
+          .map((job) => job.id)
+  ).filter(
+    (jobId, index, array) =>
+      array.indexOf(jobId) === index &&
+      !jobsWithAnalysis.value[jobId] &&
+      !hydratingJobIds.has(jobId),
+  );
+
+  if (!candidates.length) return;
+
+  await runWithConcurrency(
+    candidates,
+    JOB_HYDRATION_CONCURRENCY,
+    async (jobId) => {
+      hydratingJobIds.add(jobId);
+      try {
+        const detail = await getJob(jobId);
+        jobsWithAnalysis.value = {
+          ...jobsWithAnalysis.value,
+          [jobId]: detail,
+        };
+      } catch (error) {
+        debugError("Failed to fetch full job detail for calculation", error);
+      } finally {
+        hydratingJobIds.delete(jobId);
+      }
+    },
+  );
+};
+
+const scheduleBatchDetailRefresh = (delayMs = 1_000) => {
+  if (batchRefreshTimer) return;
+  batchRefreshTimer = window.setTimeout(() => {
+    batchRefreshTimer = null;
+    void loadSelectedBatchDetail({ silent: true });
+  }, delayMs);
+};
+
+const applyRealtimeEvent = (event: Record<string, unknown>) => {
+  const eventType = String(event.event || "");
+  const eventBatchId = String(event.batchId || "");
+  if (!eventType || eventBatchId !== selectedBatchId.value || !batchDetails.value) {
+    return false;
+  }
+
+  if (eventType === "batch.progress") {
+    return true;
+  }
+
+  if (isRealtimeJobEvent(eventType)) {
+    const jobId = String(event.jobId || "");
+    if (!jobId) return false;
+
+    const nextStatus =
+      typeof event.status === "string" && event.status.trim()
+        ? event.status
+        : eventType === "job.failed"
+          ? "failed"
+          : eventType === "job.completed"
+            ? "completed"
+            : "";
+    const nextProgressRaw = Number(event.progress);
+    const nextProgress = Number.isFinite(nextProgressRaw)
+      ? Math.max(0, Math.min(100, nextProgressRaw))
+      : null;
+    const nextErrorMessage =
+      typeof event.message === "string" ? event.message : null;
+
+    batchDetails.value = {
+      ...batchDetails.value,
+      jobs: batchDetails.value.jobs.map((job) => {
+        if (job.id !== jobId) return job;
+        return {
+          ...job,
+          ...(nextStatus ? { status: nextStatus } : {}),
+          ...(nextProgress != null ? { progress: nextProgress } : {}),
+          ...(nextErrorMessage != null
+            ? { errorMessage: nextErrorMessage }
+            : {}),
+        };
+      }),
+    };
+
+    if (selectedJobDetail.value?.id === jobId && nextStatus) {
+      selectedJobDetail.value = {
+        ...selectedJobDetail.value,
+        status: nextStatus,
+        ...(nextErrorMessage != null
+          ? { errorMessage: nextErrorMessage }
+          : {}),
+      };
+    }
+
+    if (nextStatus === "completed") {
+      void hydrateCompletedJobDetails([jobId]);
+      if (selectedJobId.value === jobId) {
+        void loadSelectedJobDetail({ silent: true, keepContent: true });
+      }
+    } else if (nextStatus === "failed" && selectedJobId.value === jobId) {
+      void loadSelectedJobDetail({ silent: true, keepContent: true });
+    }
+
+    return true;
+  }
+
+  return false;
 };
 
 const loadSelectedBatchDetail = async (opts?: { silent?: boolean }) => {
@@ -645,15 +781,11 @@ const loadSelectedBatchDetail = async (opts?: { silent?: boolean }) => {
       await loadSelectedJobDetail({ silent: true });
     }
 
-    // Load full details for any completed job to calculate CE/NCE
-    for (const job of selectedBatchJobs.value) {
-      if (job.status === "completed" && !jobsWithAnalysis.value[job.id]) {
-        try {
-          const detail = await getJob(job.id);
-          jobsWithAnalysis.value[job.id] = detail;
-        } catch (err) {
-          console.error("Failed to fetch full job detail for calculation", err);
-        }
+    await hydrateCompletedJobDetails();
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      for (const job of selectedBatchJobs.value) {
+        subscribeJob(ws, job.id);
       }
     }
 
@@ -708,6 +840,10 @@ const loadSelectedJobDetail = async (opts?: {
 const stopRealtime = () => {
   realtimeBatchId = "";
   isWsConnected = false;
+  if (batchRefreshTimer) {
+    window.clearTimeout(batchRefreshTimer);
+    batchRefreshTimer = null;
+  }
   if (pollTimer) {
     window.clearInterval(pollTimer);
     pollTimer = null;
@@ -720,9 +856,10 @@ const stopRealtime = () => {
 
 const startRealtimePollingFallback = () => {
   if (pollTimer || isWsConnected) return;
+  const interval = getRealtimePollingInterval(hasStableWsConnection);
   pollTimer = window.setInterval(() => {
     void loadSelectedBatchDetail({ silent: true });
-  }, 2000);
+  }, interval);
 };
 
 const startRealtime = () => {
@@ -740,14 +877,19 @@ const startRealtime = () => {
 
   try {
     ws = connectWs((event: any) => {
-      if (event.batchId === selectedBatchId.value) {
-        void loadSelectedBatchDetail({ silent: true });
+      if (!event || event.batchId !== selectedBatchId.value) {
+        return;
+      }
+      const handled = applyRealtimeEvent(event as Record<string, unknown>);
+      if (!handled) {
+        scheduleBatchDetailRefresh(800);
       }
     });
     ws.onopen = () => {
       if (!ws || !selectedBatchId.value) return;
       if (realtimeBatchId !== selectedBatchId.value) return;
       isWsConnected = true;
+      hasStableWsConnection = true;
       if (pollTimer) {
         window.clearInterval(pollTimer);
         pollTimer = null;
@@ -853,6 +995,9 @@ const createBatchMetadata = async () => {
       callType: inferredCallType.value,
       name: safeName,
     });
+    if (String(created.name || "").trim() !== safeName) {
+      await updateBatchName({ batchId: created.id, name: safeName });
+    }
     saveBatchName(created.id, safeName);
     batchName.value = defaultBatchName();
     toast.success("Batch metadata created");
@@ -994,22 +1139,31 @@ const submitScoreEdits = async () => {
 };
 
 const openResultForJob = async (jobId: string) => {
-  selectedJobId.value = jobId;
-  resetResultModalScoreState();
-  await loadSelectedJobDetail();
-
-  if (!selectedJobDetail.value) {
-    toast.error("Could not load recording result.");
-    return;
+  const shouldHandleSelectionInWatcher = selectedJobId.value !== jobId;
+  if (shouldHandleSelectionInWatcher) {
+    suppressSelectedJobWatcher = true;
   }
+  try {
+    selectedJobId.value = jobId;
+    resetResultModalScoreState();
+    await loadSelectedJobDetail();
 
-  hydrateScoreEditsFromDetail();
-  showResultModal.value = true;
-  void loadSelectedJobAudio();
+    if (!selectedJobDetail.value) {
+      toast.error("Could not load recording result.");
+      return;
+    }
+
+    hydrateScoreEditsFromDetail();
+    showResultModal.value = true;
+    void loadSelectedJobAudio();
+  } finally {
+    suppressSelectedJobWatcher = false;
+  }
 };
 
 const closeResultModal = () => {
   showResultModal.value = false;
+  clearSelectedJobAudioUrl();
   resetResultModalScoreState();
 };
 
@@ -1064,27 +1218,33 @@ const loadTenantPreviewStats = async (targetTenants: Tenant[]) => {
           ] as const;
         }
 
-        const batchLists = await Promise.all(
+        const projectSummaries = await Promise.all(
           tenantProjects.map(async (project) => {
             try {
-              return await listProjectBatches(project.id);
+              return await getProjectBatchSummary(project.id);
             } catch {
-              return [] as BatchHistoryItem[];
+              return null;
             }
           }),
         );
-
-        const allBatches = batchLists.flat();
-        const recordings = allBatches.reduce(
-          (sum, batch) => sum + Number(batch.totalJobs || 0),
+        const summaries = projectSummaries.filter(
+          (summary): summary is Awaited<ReturnType<typeof getProjectBatchSummary>> =>
+            Boolean(summary),
+        );
+        const recordings = summaries.reduce(
+          (sum, summary) => sum + Number(summary.totalJobs || 0),
           0,
         );
-        const completed = allBatches.reduce(
-          (sum, batch) => sum + Number(batch.completedJobs || 0),
+        const completed = summaries.reduce(
+          (sum, summary) => sum + Number(summary.completedJobs || 0),
           0,
         );
-        const failed = allBatches.reduce(
-          (sum, batch) => sum + Number(batch.failedJobs || 0),
+        const failed = summaries.reduce(
+          (sum, summary) => sum + Number(summary.failedJobs || 0),
+          0,
+        );
+        const batches = summaries.reduce(
+          (sum, summary) => sum + Number(summary.totalBatches || 0),
           0,
         );
 
@@ -1092,7 +1252,7 @@ const loadTenantPreviewStats = async (targetTenants: Tenant[]) => {
           tenant.id,
           {
             projects: tenantProjects.length,
-            batches: allBatches.length,
+            batches,
             recordings,
             completed,
             failed,
@@ -1112,44 +1272,70 @@ const seekFromScorecardEvidence = (seconds: number) => {
   resultTranscriptRef.value?.seekTo(seconds);
 };
 
+const revokeBlobAudioUrl = (audioUrl: string | null) => {
+  if (audioUrl?.startsWith("blob:")) {
+    URL.revokeObjectURL(audioUrl);
+  }
+};
+
 const clearSelectedJobAudioUrl = () => {
-  console.log("[audio][page] clearSelectedJobAudioUrl", {
-    selectedJobId: selectedJobId.value,
-  });
+  selectedJobAudioRequestId += 1;
+  if (selectedJobAudioAbortController) {
+    selectedJobAudioAbortController.abort();
+    selectedJobAudioAbortController = null;
+  }
+  revokeBlobAudioUrl(selectedJobAudioUrl.value);
   selectedJobAudioUrl.value = null;
 };
 
 const loadSelectedJobAudio = async () => {
   const jobId = selectedJobId.value;
-  if (!jobId) {
-    console.warn("[audio][page] loadSelectedJobAudio skipped: no jobId");
+  if (!jobId || !showResultModal.value) {
     return;
   }
-  console.log("[audio][page] loadSelectedJobAudio start", {
-    jobId,
-    modalOpen: showResultModal.value,
-  });
-  clearSelectedJobAudioUrl();
+  const previousAudioUrl = selectedJobAudioUrl.value;
+  if (selectedJobAudioAbortController) {
+    selectedJobAudioAbortController.abort();
+  }
+  const abortController = new AbortController();
+  selectedJobAudioAbortController = abortController;
+  const requestId = ++selectedJobAudioRequestId;
+
   try {
-    const audioUrl = getJobAudioUrl(jobId);
-    console.log("[audio][page] loadSelectedJobAudio url generated", {
-      jobId,
-      audioUrl,
-    });
+    const audioUrl = await getJobAudioBlobUrl(jobId, abortController.signal);
+    const isStale =
+      requestId !== selectedJobAudioRequestId ||
+      selectedJobAudioAbortController !== abortController ||
+      abortController.signal.aborted ||
+      selectedJobId.value !== jobId ||
+      !showResultModal.value;
+    if (isStale) {
+      revokeBlobAudioUrl(audioUrl);
+      return;
+    }
     selectedJobAudioUrl.value = audioUrl;
-    console.log("[audio][page] loadSelectedJobAudio assigned", {
-      jobId,
-      selectedJobAudioUrl: selectedJobAudioUrl.value,
-    });
+    if (previousAudioUrl && previousAudioUrl !== audioUrl) {
+      revokeBlobAudioUrl(previousAudioUrl);
+    }
   } catch (error) {
-    console.error("[audio][page] loadSelectedJobAudio failed", {
-      jobId,
-      error,
-    });
-    clearSelectedJobAudioUrl();
+    const isAbort =
+      abortController.signal.aborted ||
+      (error instanceof DOMException && error.name === "AbortError");
+    const isStale =
+      requestId !== selectedJobAudioRequestId ||
+      selectedJobAudioAbortController !== abortController;
+    if (isAbort || isStale) {
+      return;
+    }
+    revokeBlobAudioUrl(selectedJobAudioUrl.value);
+    selectedJobAudioUrl.value = null;
     toast.error(
       error instanceof Error ? error.message : "Failed to load recording audio",
     );
+  } finally {
+    if (selectedJobAudioAbortController === abortController) {
+      selectedJobAudioAbortController = null;
+    }
   }
 };
 
@@ -1337,6 +1523,9 @@ watch(selectedBatchId, async () => {
 });
 
 watch(selectedJobId, async () => {
+  if (suppressSelectedJobWatcher) {
+    return;
+  }
   const selectedIndex = selectedBatchJobs.value.findIndex(
     (job) => job.id === selectedJobId.value,
   );
@@ -1397,7 +1586,7 @@ watch(
 
 onMounted(async () => {
   try {
-    const me = await getAuthMe();
+    const me = await getAuthMeCached();
     if (!me.isRestricted) {
       isSuperAdmin.value = true;
       canManageJobs.value = true;
@@ -1860,7 +2049,7 @@ onUnmounted(() => {
                             Delete
                           </button>
                           <button
-                            v-else-if="canManageJobs && canRetryJob(job)"
+                            v-if="canManageJobs && canRetryJob(job)"
                             class="btn-ghost"
                             @click.stop="retryJobAction(job)"
                           >

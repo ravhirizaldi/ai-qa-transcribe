@@ -4,6 +4,13 @@ import ivrFiltersConfig from "../data/ivr_filters.json";
 import { logProviderError, logProviderEvent } from "./providerLogs.js";
 
 const ivrFilters = Object.values(ivrFiltersConfig).flat() as string[];
+const ivrFilterRegexes = ivrFilters.map(
+  (phrase) =>
+    new RegExp(
+      phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "gi",
+    ),
+);
 
 const convertIndonesianNumbers = (text: string): string => {
   const numberMap: Record<string, string> = {
@@ -146,9 +153,8 @@ export const transcribeAudioFile = async (
   const cleanedSegments = segments
     .map((seg) => {
       let cleanedText = seg.text || "";
-      for (const phrase of ivrFilters) {
-        const escapedPhrase = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        cleanedText = cleanedText.replace(new RegExp(escapedPhrase, "gi"), "");
+      for (const pattern of ivrFilterRegexes) {
+        cleanedText = cleanedText.replace(pattern, "");
       }
       cleanedText = cleanedText.replace(/\s+/g, " ").trim();
       cleanedText = cleanedText.replace(/^[\s,.-]+/, "");

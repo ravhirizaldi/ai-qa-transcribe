@@ -96,7 +96,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       .values({
         email: body.email,
         fullname: normalizeFullname(body.fullname),
-        passwordHash: hashPassword(body.password),
+        passwordHash: await hashPassword(body.password),
         isRestricted: body.isRestricted,
       })
       .returning({
@@ -230,7 +230,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
 
       await db
         .update(users)
-        .set({ passwordHash: hashPassword(body.password), updatedAt: new Date() })
+        .set({ passwordHash: await hashPassword(body.password), updatedAt: new Date() })
         .where(eq(users.id, params.userId));
 
       return { ok: true };

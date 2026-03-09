@@ -33,6 +33,11 @@ const isWaveReady = ref(false);
 const resolvedAudioUrl = ref("");
 let localFileUrl: string | null = null;
 const WAVE_BAR_COUNT = 120;
+const isDev = import.meta.env.DEV;
+const debugAudio = (...args: unknown[]) => {
+  if (!isDev) return;
+  console.log(...args);
+};
 
 const resolveAudioUrl = () => {
   if (localFileUrl) {
@@ -49,7 +54,7 @@ const resolveAudioUrl = () => {
 
 const initWaveSurfer = () => {
   resolveAudioUrl();
-  console.log("[audio][player] init", {
+  debugAudio("[audio][player] init", {
     hasContainer: Boolean(waveformContainer.value),
     hasFile: Boolean(props.file),
     hasAudioUrlProp: Boolean(props.audioUrl),
@@ -136,7 +141,7 @@ const onAudioLoadedMetadata = () => {
   if (!audioEl.value) return;
   duration.value = Number.isFinite(audioEl.value.duration) ? audioEl.value.duration : 0;
   isWaveReady.value = duration.value > 0;
-  console.log("[audio][player] loadedmetadata", { duration: duration.value });
+  debugAudio("[audio][player] loadedmetadata", { duration: duration.value });
 };
 
 const onAudioTimeUpdate = () => {
@@ -160,6 +165,7 @@ const onAudioEnded = () => {
 const onAudioError = () => {
   isWaveReady.value = false;
   const mediaError = audioEl.value?.error;
+  if (!isDev) return;
   console.error("[audio][player] error", {
     sourceUrl: resolvedAudioUrl.value,
     code: mediaError?.code,

@@ -39,15 +39,32 @@ const parse = async <T>(response: Response): Promise<T> => {
   return response.json() as Promise<T>;
 };
 
+const parseErrorMessage = async (response: Response) => {
+  const body = await response.text();
+  if (!body) {
+    return `Request failed with ${response.status}`;
+  }
+  try {
+    const parsed = JSON.parse(body) as { message?: unknown };
+    if (typeof parsed?.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+  } catch {
+    // Ignore JSON parsing error and use raw text.
+  }
+  return body;
+};
+
 export const register = async (email: string, password: string) => {
   const response = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string; fullname: string } }>(
-    response,
-  );
+  return parse<{
+    token: string;
+    user: { id: string; email: string; fullname: string };
+  }>(response);
 };
 
 export const login = async (email: string, password: string) => {
@@ -56,9 +73,10 @@ export const login = async (email: string, password: string) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return parse<{ token: string; user: { id: string; email: string; fullname: string } }>(
-    response,
-  );
+  return parse<{
+    token: string;
+    user: { id: string; email: string; fullname: string };
+  }>(response);
 };
 
 export const getAuthBootstrapStatus = async () => {
@@ -74,9 +92,44 @@ export type AuthMe = {
   permissions: string[];
 };
 
+const AUTH_ME_CACHE_TTL_MS = 30_000;
+let authMeCache: {
+  token: string;
+  value: AuthMe;
+  expiresAt: number;
+} | null = null;
+
+export const clearAuthMeCache = () => {
+  authMeCache = null;
+};
+
 export const getAuthMe = async () => {
   const response = await fetch(`${API_BASE}/auth/me`, { headers: withAuth() });
   return parse<AuthMe>(response);
+};
+
+export const getAuthMeCached = async (opts?: { force?: boolean }) => {
+  const token = getToken();
+  if (!token) {
+    clearAuthMeCache();
+    throw new Error("Missing auth token.");
+  }
+  const now = Date.now();
+  if (
+    !opts?.force &&
+    authMeCache &&
+    authMeCache.token === token &&
+    authMeCache.expiresAt > now
+  ) {
+    return authMeCache.value;
+  }
+  const next = await getAuthMe();
+  authMeCache = {
+    token,
+    value: next,
+    expiresAt: now + AUTH_ME_CACHE_TTL_MS,
+  };
+  return next;
 };
 
 export type Tenant = {
@@ -94,9 +147,7 @@ export type Project = {
   supportsInbound: boolean;
   supportsOutbound: boolean;
   batchHistoryLockDays: number;
-  ceScoringPolicy:
-    | "strict_zero_all_ce_if_any_fail"
-    | "weighted_ce_independent";
+  ceScoringPolicy: "strict_zero_all_ce_if_any_fail" | "weighted_ce_independent";
 };
 
 export type RagDocSyncStatus = "pending" | "synced" | "failed" | "deleted";
@@ -144,6 +195,7 @@ export type BatchHistoryItem = {
   id: string;
   tenantId: string;
   projectId: string;
+  name?: string | null;
   createdBy: string;
   createdByFullname: string;
   callType: "inbound" | "outbound";
@@ -162,6 +214,7 @@ export type BatchDetail = {
   id: string;
   tenantId: string;
   projectId: string;
+  name?: string | null;
   createdBy: string;
   createdByFullname: string;
   callType: "inbound" | "outbound";
@@ -171,6 +224,11 @@ export type BatchDetail = {
   lockDays?: number;
   lockAt?: string;
   isLocked?: boolean;
+  totalJobs?: number;
+  completedJobs?: number;
+  failedJobs?: number;
+  runningJobs?: number;
+  queuedJobs?: number;
   jobs: Array<{
     id: string;
     status: string;
@@ -178,6 +236,37 @@ export type BatchDetail = {
     progress: number;
     errorMessage?: string | null;
   }>;
+};
+
+export type ProjectBatchSummary = {
+  projectId: string;
+  totalBatches: number;
+  totalJobs: number;
+  completedJobs: number;
+  failedJobs: number;
+  runningJobs: number;
+  queuedJobs: number;
+};
+
+export type AssistantChatStreamRequest = {
+  tenantId: string;
+  projectId: string;
+  message: string;
+  previousResponseId?: string;
+};
+
+export type AssistantChatMetaEvent = {
+  responseId: string | null;
+  tenantId: string;
+  projectId: string;
+};
+
+export type AssistantChatStreamHandlers = {
+  signal?: AbortSignal;
+  onToken?: (text: string) => void;
+  onMeta?: (meta: AssistantChatMetaEvent) => void;
+  onError?: (message: string) => void;
+  onDone?: () => void;
 };
 
 export type JobEvaluationTableRow = {
@@ -575,7 +664,10 @@ export const updateGlobalSettings = async (payload: {
   }>(response);
 };
 
-export const getProjectRagSummary = async (tenantId: string, projectId: string) => {
+export const getProjectRagSummary = async (
+  tenantId: string,
+  projectId: string,
+) => {
   const response = await fetch(
     `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/summary`,
     {
@@ -592,7 +684,8 @@ export const listProjectRagDocs = async (
 ) => {
   const params = new URLSearchParams();
   if (query?.status) params.set("status", query.status);
-  if (typeof query?.limit === "number") params.set("limit", String(query.limit));
+  if (typeof query?.limit === "number")
+    params.set("limit", String(query.limit));
   if (query?.cursor) params.set("cursor", query.cursor);
   const qs = params.toString();
   const response = await fetch(
@@ -602,6 +695,20 @@ export const listProjectRagDocs = async (
     },
   );
   return parse<ProjectRagDocsPage>(response);
+};
+
+export const getProjectRagDocPreview = async (
+  tenantId: string,
+  projectId: string,
+  ragDocId: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/tenants/${tenantId}/projects/${projectId}/rag/docs/${ragDocId}/preview`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<any>(response);
 };
 
 export const deleteProjectRagDoc = async (
@@ -746,12 +853,18 @@ export const updateSettingsUser = async (
   return parse<SettingsUserProfile>(response);
 };
 
-export const changeSettingsUserPassword = async (userId: string, password: string) => {
-  const response = await fetch(`${API_BASE}/settings/users/${userId}/password`, {
-    method: "PUT",
-    headers: withAuth({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ password }),
-  });
+export const changeSettingsUserPassword = async (
+  userId: string,
+  password: string,
+) => {
+  const response = await fetch(
+    `${API_BASE}/settings/users/${userId}/password`,
+    {
+      method: "PUT",
+      headers: withAuth({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ password }),
+    },
+  );
   return parse<{ ok: boolean }>(response);
 };
 
@@ -793,6 +906,16 @@ export const listProjectBatches = async (projectId: string) => {
   return parse<BatchHistoryItem[]>(response);
 };
 
+export const getProjectBatchSummary = async (projectId: string) => {
+  const response = await fetch(
+    `${API_BASE}/projects/${projectId}/batches/summary`,
+    {
+      headers: withAuth(),
+    },
+  );
+  return parse<ProjectBatchSummary>(response);
+};
+
 export const createProjectBatch = async (payload: {
   tenantId: string;
   projectId: string;
@@ -815,6 +938,7 @@ export const createProjectBatch = async (payload: {
     id: string;
     tenantId: string;
     projectId: string;
+    name?: string | null;
     callType: "inbound" | "outbound";
     status: string;
     createdAt: string;
@@ -841,6 +965,18 @@ export const uploadBatchFiles = async (payload: {
   return parse<{ batchId: string; jobIds: string[]; analyzeNow: boolean }>(
     response,
   );
+};
+
+export const updateBatchName = async (payload: {
+  batchId: string;
+  name: string;
+}) => {
+  const response = await fetch(`${API_BASE}/batches/${payload.batchId}/name`, {
+    method: "PATCH",
+    headers: withAuth({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name: payload.name }),
+  });
+  return parse<{ ok: boolean; id: string; name: string }>(response);
 };
 
 export const analyzeBatchNow = async (batchId: string) => {
@@ -902,130 +1038,89 @@ export const listJobScoreHistory = async (jobId: string) => {
 };
 
 export const getJobAudioUrl = (jobId: string) => {
-  const token = getToken();
-  if (!token) {
-    throw new Error("Missing auth token.");
-  }
-  return `${API_BASE}/jobs/${jobId}/audio?token=${encodeURIComponent(token)}`;
+  return `${API_BASE}/jobs/${jobId}/audio`;
 };
 
-export const getJobAudioBlobUrl = async (jobId: string) => {
-  const token = getToken();
-  if (!token) {
-    throw new Error("Missing auth token.");
-  }
-
-  return new Promise<string>((resolve, reject) => {
-    const reqUrl = `${API_BASE}/jobs/${jobId}/audio?t=${Date.now()}`;
-    console.log("[audio][xhr] init", {
-      jobId,
-      apiBase: API_BASE,
-      reqUrl,
-      tokenLength: token.length,
+export const getJobAudioBlobUrl = async (
+  jobId: string,
+  signal?: AbortSignal,
+) => {
+  const fetchBlobFrom = async (url: string) => {
+    const response = await fetch(url, {
+      headers: withAuth(),
+      cache: "no-store",
+      signal,
     });
 
-    const xhr = new XMLHttpRequest();
-    xhr.open("GET", reqUrl, true);
-    xhr.responseType = "blob";
-    xhr.timeout = 60_000;
-    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-
-    xhr.onreadystatechange = () => {
-      console.log("[audio][xhr] readyState", {
-        jobId,
-        readyState: xhr.readyState,
-        status: xhr.status,
-      });
-    };
-    xhr.onloadstart = () => {
-      console.log("[audio][xhr] loadstart", { jobId });
-    };
-    xhr.onprogress = (event) => {
-      console.log("[audio][xhr] progress", {
-        jobId,
-        loaded: event.loaded,
-        total: event.total,
-        lengthComputable: event.lengthComputable,
-      });
-    };
-
-    xhr.onload = () => {
-      console.log("[audio][xhr] load", {
-        jobId,
-        status: xhr.status,
-        statusText: xhr.statusText,
-        responseType: xhr.responseType,
-        contentType: xhr.getResponseHeader("content-type"),
-        contentLength: xhr.getResponseHeader("content-length"),
-      });
-
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const blob = xhr.response;
-        if (!blob) {
-          console.error("[audio][xhr] empty blob response", { jobId });
-          reject(new Error("Empty audio response"));
-          return;
-        }
-        console.log("[audio][xhr] success blob", {
-          jobId,
-          blobType: blob.type,
-          blobSize: blob.size,
-        });
-        resolve(URL.createObjectURL(blob));
-        return;
-      }
-
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = String(reader.result || "");
-        console.error("[audio][xhr] non-2xx response body", {
-          jobId,
-          status: xhr.status,
-          text,
-        });
+    if (!response.ok) {
+      const body = await response.text();
+      if (body) {
+        let parsedMessage = "";
         try {
-          const parsed = JSON.parse(text) as { message?: unknown };
+          const parsed = JSON.parse(body) as { message?: unknown };
           if (typeof parsed?.message === "string" && parsed.message.trim()) {
-            reject(new Error(parsed.message));
-            return;
+            parsedMessage = parsed.message.trim();
           }
         } catch {
-          // no-op
+          // Ignore JSON parsing errors and fall back to raw text.
         }
-        reject(new Error(text || `Failed to load recording audio (${xhr.status})`));
-      };
-      reader.onerror = () =>
-        reject(new Error(`Failed to load recording audio (${xhr.status})`));
-      reader.readAsText(xhr.response);
-    };
+        throw new Error(parsedMessage || body);
+      }
+      throw new Error(`Failed to load recording audio (${response.status})`);
+    }
 
-    xhr.onerror = () => {
-      console.error("[audio][xhr] onerror", {
-        jobId,
-        status: xhr.status,
-        statusText: xhr.statusText,
-      });
-      reject(new Error("Network error while loading recording audio"));
-    };
-    xhr.onabort = () => {
-      console.warn("[audio][xhr] onabort", { jobId });
-      reject(new Error("Recording audio request was aborted"));
-    };
-    xhr.ontimeout = () => {
-      console.error("[audio][xhr] timeout", { jobId, timeoutMs: xhr.timeout });
-      reject(new Error("Recording audio request timed out"));
-    };
-    xhr.onloadend = () => {
-      console.log("[audio][xhr] loadend", {
-        jobId,
-        status: xhr.status,
-        responseURL: xhr.responseURL,
-      });
-    };
+    const hintedType =
+      response.headers.get("x-audio-content-type") ||
+      response.headers.get("content-type") ||
+      "";
+    const blob = await response.blob();
+    if (!blob || blob.size === 0) {
+      throw new Error("Empty audio response");
+    }
+    if (
+      hintedType &&
+      !hintedType.toLowerCase().includes("application/octet-stream") &&
+      blob.type !== hintedType
+    ) {
+      return new Blob([blob], { type: hintedType });
+    }
+    return blob;
+  };
 
-    console.log("[audio][xhr] send", { jobId, reqUrl });
-    xhr.send();
-  });
+  const suffix = `/jobs/${jobId}/audio-blob?t=${Date.now()}`;
+  const primaryUrl = `${API_BASE}${suffix}`;
+  const canUseDevDirectFallback =
+    import.meta.env.DEV &&
+    typeof window !== "undefined" &&
+    API_BASE.startsWith("/");
+
+  try {
+    const blob = await fetchBlobFrom(primaryUrl);
+    return URL.createObjectURL(blob);
+  } catch (error) {
+    if (
+      signal?.aborted ||
+      (error instanceof DOMException && error.name === "AbortError")
+    ) {
+      throw error;
+    }
+    if (!canUseDevDirectFallback) {
+      throw error;
+    }
+
+    const directApiBase = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const fallbackUrl = `${directApiBase}${suffix}`;
+    if (import.meta.env.DEV) {
+      console.warn("[audio] proxy fetch failed, retrying direct backend URL", {
+        primaryUrl,
+        fallbackUrl,
+        error:
+          error instanceof Error ? error.message : "Unknown audio fetch error",
+      });
+    }
+    const blob = await fetchBlobFrom(fallbackUrl);
+    return URL.createObjectURL(blob);
+  }
 };
 
 export const deleteJob = async (jobId: string) => {
@@ -1042,6 +1137,112 @@ export const retryJob = async (jobId: string) => {
     headers: withAuth(),
   });
   return parse<{ ok: boolean }>(response);
+};
+
+export const streamAssistantChat = async (
+  payload: AssistantChatStreamRequest,
+  handlers?: AssistantChatStreamHandlers,
+) => {
+  const response = await fetch(`${API_BASE}/assistant/chat/stream`, {
+    method: "POST",
+    headers: withAuth({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    }),
+    body: JSON.stringify(payload),
+    signal: handlers?.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseErrorMessage(response));
+  }
+
+  if (!response.body) {
+    throw new Error("Assistant stream is not available.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let hasDone = false;
+
+  const handleEvent = (chunk: string) => {
+    const lines = chunk
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0 && !line.startsWith(":"));
+    if (!lines.length) return;
+
+    let eventName = "message";
+    const dataLines: string[] = [];
+
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+        continue;
+      }
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    const dataText = dataLines.join("\n");
+    let parsed: unknown = null;
+    if (dataText) {
+      try {
+        parsed = JSON.parse(dataText);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (eventName === "token") {
+      const text = String((parsed as { text?: unknown })?.text || "");
+      if (text) handlers?.onToken?.(text);
+      return;
+    }
+    if (eventName === "meta") {
+      const meta = parsed as AssistantChatMetaEvent;
+      if (
+        meta &&
+        typeof meta.tenantId === "string" &&
+        typeof meta.projectId === "string"
+      ) {
+        handlers?.onMeta?.(meta);
+      }
+      return;
+    }
+    if (eventName === "error") {
+      const message = String((parsed as { message?: unknown })?.message || "");
+      if (message) handlers?.onError?.(message);
+      return;
+    }
+    if (eventName === "done") {
+      hasDone = true;
+      handlers?.onDone?.();
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    while (true) {
+      const boundary = buffer.indexOf("\n\n");
+      if (boundary < 0) break;
+      const eventChunk = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      if (!eventChunk.trim()) continue;
+      handleEvent(eventChunk);
+      if (hasDone) return;
+    }
+  }
+
+  const remaining = buffer.trim();
+  if (remaining) {
+    handleEvent(remaining);
+  }
 };
 
 export const connectWs = (

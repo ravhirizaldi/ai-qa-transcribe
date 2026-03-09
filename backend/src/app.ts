@@ -11,12 +11,17 @@ import { jobRoutes } from "./routes/jobs.js";
 import { healthRoutes } from "./routes/health.js";
 import { wsRoutes } from "./routes/ws.js";
 import { settingsRoutes } from "./routes/settings.js";
+import { assistantRoutes } from "./routes/assistant.js";
 import { broadcastEvent } from "./ws-hub.js";
 import { boss, QUEUES, startQueue } from "./queue.js";
+import { observeHttpRequest } from "./observability.js";
 
 declare module "fastify" {
   interface FastifyInstance {
     authenticate: (request: any, reply: any) => Promise<void>;
+  }
+  interface FastifyRequest {
+    _startedAtNs?: bigint;
   }
 }
 
@@ -75,6 +80,23 @@ export const buildApp = async () => {
     }
   });
 
+  app.addHook("onRequest", async (request) => {
+    request._startedAtNs = process.hrtime.bigint();
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const startedAt = request._startedAtNs;
+    if (!startedAt) return;
+    const elapsedNs = process.hrtime.bigint() - startedAt;
+    const durationMs = Number(elapsedNs) / 1_000_000;
+    observeHttpRequest({
+      method: request.method,
+      route: request.routeOptions?.url || request.url,
+      statusCode: reply.statusCode,
+      durationMs,
+    });
+  });
+
   await startQueue();
   await boss.createQueue(QUEUES.WS_EVENTS);
   await boss.createQueue(QUEUES.RAG_SYNC_CORRECTION);
@@ -89,6 +111,7 @@ export const buildApp = async () => {
   await app.register(authRoutes);
   await app.register(tenantRoutes);
   await app.register(settingsRoutes);
+  await app.register(assistantRoutes);
   await app.register(matrixRoutes);
   await app.register(jobRoutes);
   await app.register(wsRoutes);

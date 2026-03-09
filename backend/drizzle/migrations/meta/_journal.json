@@ -92,6 +92,20 @@
       "when": 1772805600000,
       "tag": "0012_rag_collections",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1772812800000,
+      "tag": "0013_performance_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1772899200000,
+      "tag": "0014_batch_name",
+      "breakpoints": true
     }
   ]
 }

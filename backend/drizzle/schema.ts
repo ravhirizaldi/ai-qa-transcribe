@@ -159,6 +159,11 @@ export const projectMatrixVersions = pgTable(
   (t) => [
     unique().on(t.projectId, t.callType, t.versionNumber),
     unique().on(t.id, t.projectId),
+    index("project_matrix_versions_project_call_active_idx").on(
+      t.projectId,
+      t.callType,
+      t.isActive,
+    ),
   ],
 );
 
@@ -185,6 +190,7 @@ export const batches = pgTable(
     tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
     projectId: uuid("project_id").notNull().references(() => projects.id),
     userId: uuid("user_id").notNull().references(() => users.id),
+    name: text("name"),
     callType: callTypeEnum("call_type").notNull(),
     status: statusEnum("status").default("queued").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -192,6 +198,7 @@ export const batches = pgTable(
   },
   (t) => [
     unique().on(t.id, t.tenantId, t.projectId),
+    index("batches_project_created_idx").on(t.projectId, t.createdAt),
     foreignKey({
       columns: [t.projectId, t.tenantId],
       foreignColumns: [projects.id, projects.tenantId],
@@ -226,6 +233,9 @@ export const jobs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
+    index("jobs_batch_status_idx").on(t.batchId, t.status),
+    index("jobs_batch_created_idx").on(t.batchId, t.createdAt),
+    index("jobs_project_created_idx").on(t.projectId, t.createdAt),
     foreignKey({
       columns: [t.projectId, t.tenantId],
       foreignColumns: [projects.id, projects.tenantId],
@@ -252,19 +262,23 @@ export const jobTranscripts = pgTable("job_transcripts", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const jobSegments = pgTable("job_segments", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  jobId: uuid("job_id").notNull().references(() => jobs.id),
-  segmentIndex: integer("segment_index").notNull(),
-  speakerId: text("speaker_id").notNull(),
-  role: text("role"),
-  startSec: real("start_sec").notNull(),
-  endSec: real("end_sec").notNull(),
-  rawText: text("raw_text").notNull(),
-  cleanedText: text("cleaned_text"),
-  sentiment: text("sentiment"),
-  wordsJson: jsonb("words_json").$type<unknown[]>().notNull().default([]),
-});
+export const jobSegments = pgTable(
+  "job_segments",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    jobId: uuid("job_id").notNull().references(() => jobs.id),
+    segmentIndex: integer("segment_index").notNull(),
+    speakerId: text("speaker_id").notNull(),
+    role: text("role"),
+    startSec: real("start_sec").notNull(),
+    endSec: real("end_sec").notNull(),
+    rawText: text("raw_text").notNull(),
+    cleanedText: text("cleaned_text"),
+    sentiment: text("sentiment"),
+    wordsJson: jsonb("words_json").$type<unknown[]>().notNull().default([]),
+  },
+  (t) => [index("job_segments_job_segment_idx").on(t.jobId, t.segmentIndex)],
+);
 
 export const jobAnalyses = pgTable("job_analyses", {
   jobId: uuid("job_id").primaryKey().references(() => jobs.id),
@@ -276,18 +290,22 @@ export const jobAnalyses = pgTable("job_analyses", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const jobEvaluationRows = pgTable("job_evaluation_rows", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  jobId: uuid("job_id").notNull().references(() => jobs.id),
-  rowIndex: integer("row_index").notNull(),
-  area: text("area").notNull(),
-  parameter: text("parameter").notNull(),
-  description: text("description").notNull(),
-  evidenceTimestamp: text("evidence_timestamp").notNull(),
-  note: text("note").notNull(),
-  score: integer("score").notNull(),
-  maxScore: integer("max_score").notNull(),
-});
+export const jobEvaluationRows = pgTable(
+  "job_evaluation_rows",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    jobId: uuid("job_id").notNull().references(() => jobs.id),
+    rowIndex: integer("row_index").notNull(),
+    area: text("area").notNull(),
+    parameter: text("parameter").notNull(),
+    description: text("description").notNull(),
+    evidenceTimestamp: text("evidence_timestamp").notNull(),
+    note: text("note").notNull(),
+    score: integer("score").notNull(),
+    maxScore: integer("max_score").notNull(),
+  },
+  (t) => [index("job_evaluation_rows_job_row_idx").on(t.jobId, t.rowIndex)],
+);
 
 export const jobScoreEditHistory = pgTable(
   "job_score_edit_history",

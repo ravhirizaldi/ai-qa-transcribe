@@ -16,6 +16,7 @@ import {
   getProjectRagSummary,
   listMatrixVersions,
   listProjectRagDocs,
+  getProjectRagDocPreview,
   listProjects,
   listTenants,
   retryProjectRagDoc,
@@ -55,10 +56,9 @@ const projectForm = ref({
   logoUrl: "",
   callType: "inbound" as MatrixCallType,
   batchHistoryLockDays: 2,
-  ceScoringPolicy:
-    "strict_zero_all_ce_if_any_fail" as
-      | "strict_zero_all_ce_if_any_fail"
-      | "weighted_ce_independent",
+  ceScoringPolicy: "strict_zero_all_ce_if_any_fail" as
+    | "strict_zero_all_ce_if_any_fail"
+    | "weighted_ce_independent",
 });
 const projectModalTenantLocked = ref(false);
 const creatingProject = ref(false);
@@ -76,10 +76,9 @@ const editProjectForm = ref({
   name: "",
   logoUrl: "",
   batchHistoryLockDays: 2,
-  ceScoringPolicy:
-    "strict_zero_all_ce_if_any_fail" as
-      | "strict_zero_all_ce_if_any_fail"
-      | "weighted_ce_independent",
+  ceScoringPolicy: "strict_zero_all_ce_if_any_fail" as
+    | "strict_zero_all_ce_if_any_fail"
+    | "weighted_ce_independent",
 });
 const savingProjectEdit = ref(false);
 const uploadingEditProjectLogo = ref(false);
@@ -147,10 +146,11 @@ const canUseInboundMatrix = computed(() =>
 const canUseOutboundMatrix = computed(() =>
   Boolean(activeProject.value?.supportsOutbound),
 );
-const workspaceSectionTabs: Array<{ value: WorkspaceSection; label: string }> = [
-  { value: "matrix", label: "QA Evaluation Matrix" },
-  { value: "rag", label: "Knowledge Base Docs" },
-];
+const workspaceSectionTabs: Array<{ value: WorkspaceSection; label: string }> =
+  [
+    { value: "matrix", label: "QA Evaluation Matrix" },
+    { value: "rag", label: "Knowledge Base Docs" },
+  ];
 
 const ragSummary = ref<ProjectRagSummary | null>(null);
 const ragDocs = ref<ProjectRagDoc[]>([]);
@@ -162,6 +162,30 @@ const ragNextCursor = ref<string | null>(null);
 const ragCurrentCursor = ref<string | null>(null);
 const ragCursorHistory = ref<Array<string | null>>([]);
 const ragPageSize = 20;
+
+const showPreviewModal = ref(false);
+const previewContent = ref<string>("");
+const previewLoading = ref(false);
+
+const previewRagDocAction = async (doc: ProjectRagDoc) => {
+  if (!workspaceTenantId.value || !workspaceProjectId.value) return;
+  previewContent.value = "";
+  showPreviewModal.value = true;
+  previewLoading.value = true;
+  try {
+    const data = await getProjectRagDocPreview(
+      workspaceTenantId.value,
+      workspaceProjectId.value,
+      doc.id,
+    );
+    previewContent.value = JSON.stringify(data, null, 2);
+  } catch (err) {
+    previewContent.value = String(err instanceof Error ? err.message : err);
+  } finally {
+    previewLoading.value = false;
+  }
+};
+
 const ragStatusOptions: Array<{ value: RagStatusFilter; label: string }> = [
   { value: "all", label: "All Statuses" },
   { value: "pending", label: "Pending" },
@@ -468,6 +492,8 @@ const closeWorkspaceModal = () => {
   ragNextCursor.value = null;
   ragCurrentCursor.value = null;
   ragCursorHistory.value = [];
+  showPreviewModal.value = false;
+  previewContent.value = "";
   void clearWorkspaceParams();
 };
 
@@ -610,7 +636,8 @@ const loadRagData = async (options?: { resetPaging?: boolean }) => {
     const [summary, page] = await Promise.all([
       getProjectRagSummary(workspaceTenantId.value, workspaceProjectId.value),
       listProjectRagDocs(workspaceTenantId.value, workspaceProjectId.value, {
-        status: ragStatusFilter.value === "all" ? undefined : ragStatusFilter.value,
+        status:
+          ragStatusFilter.value === "all" ? undefined : ragStatusFilter.value,
         limit: ragPageSize,
         cursor: ragCurrentCursor.value || undefined,
       }),
@@ -837,7 +864,9 @@ const saveProjectEdit = async () => {
       {
         name: editProjectForm.value.name.trim(),
         logoUrl: editProjectForm.value.logoUrl.trim() || null,
-        batchHistoryLockDays: Math.floor(editProjectForm.value.batchHistoryLockDays),
+        batchHistoryLockDays: Math.floor(
+          editProjectForm.value.batchHistoryLockDays,
+        ),
         ceScoringPolicy: editProjectForm.value.ceScoringPolicy,
       },
     );
@@ -1454,26 +1483,26 @@ onMounted(async () => {
                   <ImageIcon v-else class="w-4 h-4" />
                 </div>
                 <div>
-                <p class="project-name">{{ project.name }}</p>
-                <p class="project-meta">
-                  {{ project.supportsInbound ? "Inbound" : "" }}
-                  {{
-                    project.supportsInbound && project.supportsOutbound
-                      ? " | "
-                      : ""
-                  }}
-                  {{ project.supportsOutbound ? "Outbound" : "" }}
-                  {{
-                    (project.supportsInbound || project.supportsOutbound)
-                      ? " | "
-                      : ""
-                  }}
-                  {{
-                    project.ceScoringPolicy === "weighted_ce_independent"
-                      ? "CE Weighted"
-                      : "CE Strict"
-                  }}
-                </p>
+                  <p class="project-name">{{ project.name }}</p>
+                  <p class="project-meta">
+                    {{ project.supportsInbound ? "Inbound" : "" }}
+                    {{
+                      project.supportsInbound && project.supportsOutbound
+                        ? " | "
+                        : ""
+                    }}
+                    {{ project.supportsOutbound ? "Outbound" : "" }}
+                    {{
+                      project.supportsInbound || project.supportsOutbound
+                        ? " | "
+                        : ""
+                    }}
+                    {{
+                      project.ceScoringPolicy === "weighted_ce_independent"
+                        ? "CE Weighted"
+                        : "CE Strict"
+                    }}
+                  </p>
                 </div>
               </div>
               <div class="tenant-card-actions" @click.stop>
@@ -1499,7 +1528,9 @@ onMounted(async () => {
                 v-for="tab in workspaceSectionTabs"
                 :key="tab.value"
                 class="workspace-tab"
-                :class="{ 'workspace-tab-active': workspaceSection === tab.value }"
+                :class="{
+                  'workspace-tab-active': workspaceSection === tab.value,
+                }"
                 @click="switchWorkspaceSection(tab.value)"
               >
                 {{ tab.label }}
@@ -1515,13 +1546,15 @@ onMounted(async () => {
                     <span
                       class="policy-badge"
                       :class="
-                        activeProject.ceScoringPolicy === 'weighted_ce_independent'
+                        activeProject.ceScoringPolicy ===
+                        'weighted_ce_independent'
                           ? 'policy-badge-weighted'
                           : 'policy-badge-strict'
                       "
                     >
                       {{
-                        activeProject.ceScoringPolicy === "weighted_ce_independent"
+                        activeProject.ceScoringPolicy ===
+                        "weighted_ce_independent"
                           ? "CE Weighted"
                           : "CE Strict"
                       }}
@@ -1531,7 +1564,9 @@ onMounted(async () => {
                 <div class="toggle-row">
                   <button
                     class="btn-ghost"
-                    :class="{ 'btn-toggle-active': matrixCallType === 'inbound' }"
+                    :class="{
+                      'btn-toggle-active': matrixCallType === 'inbound',
+                    }"
                     :disabled="!canUseInboundMatrix"
                     @click="matrixCallType = 'inbound'"
                   >
@@ -1539,7 +1574,9 @@ onMounted(async () => {
                   </button>
                   <button
                     class="btn-ghost"
-                    :class="{ 'btn-toggle-active': matrixCallType === 'outbound' }"
+                    :class="{
+                      'btn-toggle-active': matrixCallType === 'outbound',
+                    }"
                     :disabled="!canUseOutboundMatrix"
                     @click="matrixCallType = 'outbound'"
                   >
@@ -1587,7 +1624,11 @@ onMounted(async () => {
                       >
                         <span>v{{ version.versionNumber }}</span>
                         <div
-                          style="display: flex; align-items: center; gap: 0.4rem"
+                          style="
+                            display: flex;
+                            align-items: center;
+                            gap: 0.4rem;
+                          "
                         >
                           <span v-if="version.isActive" class="matrix-badge"
                             >Active</span
@@ -1643,7 +1684,9 @@ onMounted(async () => {
                         >Unsaved changes</span
                       >
                     </div>
-                    <div style="display: flex; gap: 0.5rem; align-items: center">
+                    <div
+                      style="display: flex; gap: 0.5rem; align-items: center"
+                    >
                       <input
                         type="file"
                         accept=".json"
@@ -1730,7 +1773,10 @@ onMounted(async () => {
                   </p>
                 </div>
                 <div v-if="activeProject" class="rag-controls">
-                  <select v-model="ragStatusFilter" class="input rag-filter-select">
+                  <select
+                    v-model="ragStatusFilter"
+                    class="input rag-filter-select"
+                  >
                     <option
                       v-for="opt in ragStatusOptions"
                       :key="opt.value"
@@ -1759,12 +1805,6 @@ onMounted(async () => {
                   </p>
                   <div v-else-if="ragSummary" class="rag-summary-grid">
                     <p class="rag-summary-item">
-                      <span class="rag-summary-label">Collection ID</span>
-                      <span class="rag-summary-value">
-                        {{ ragSummary.collectionId || "-" }}
-                      </span>
-                    </p>
-                    <p class="rag-summary-item">
                       <span class="rag-summary-label">Last Synced</span>
                       <span class="rag-summary-value">
                         {{ formatDateTime(ragSummary.lastSyncedAt) }}
@@ -1772,19 +1812,27 @@ onMounted(async () => {
                     </p>
                     <p class="rag-summary-item">
                       <span class="rag-summary-label">Pending</span>
-                      <span class="rag-summary-value">{{ ragSummary.counts.pending }}</span>
+                      <span class="rag-summary-value">{{
+                        ragSummary.counts.pending
+                      }}</span>
                     </p>
                     <p class="rag-summary-item">
                       <span class="rag-summary-label">Synced</span>
-                      <span class="rag-summary-value">{{ ragSummary.counts.synced }}</span>
+                      <span class="rag-summary-value">{{
+                        ragSummary.counts.synced
+                      }}</span>
                     </p>
                     <p class="rag-summary-item">
                       <span class="rag-summary-label">Failed</span>
-                      <span class="rag-summary-value">{{ ragSummary.counts.failed }}</span>
+                      <span class="rag-summary-value">{{
+                        ragSummary.counts.failed
+                      }}</span>
                     </p>
                     <p class="rag-summary-item">
                       <span class="rag-summary-label">Deleted</span>
-                      <span class="rag-summary-value">{{ ragSummary.counts.deleted }}</span>
+                      <span class="rag-summary-value">{{
+                        ragSummary.counts.deleted
+                      }}</span>
                     </p>
                   </div>
                 </div>
@@ -1812,9 +1860,14 @@ onMounted(async () => {
                     </thead>
                     <tbody>
                       <tr v-for="doc in ragDocs" :key="doc.id">
-                        <td class="rag-cell-main">{{ doc.fileName }}</td>
+                        <td class="rag-cell-main" :title="doc.fileName">
+                          {{ truncateText(doc.fileName, 30) }}
+                        </td>
                         <td>{{ doc.parameter }} / #{{ doc.rowIndex }}</td>
-                        <td>{{ doc.oldScore }} -> {{ doc.newScore }} / {{ doc.maxScore }}</td>
+                        <td>
+                          {{ doc.oldScore }} -> {{ doc.newScore }} /
+                          {{ doc.maxScore }}
+                        </td>
                         <td class="rag-reason" :title="doc.reasonNote">
                           {{ truncateText(doc.reasonNote, 110) }}
                         </td>
@@ -1839,7 +1892,21 @@ onMounted(async () => {
                         </td>
                         <td>{{ formatDateTime(doc.uploadedAt) }}</td>
                         <td>{{ formatDateTime(doc.createdAt) }}</td>
-                        <td>
+                        <td
+                          style="
+                            display: flex;
+                            gap: 0.4rem;
+                            border-bottom: none;
+                          "
+                        >
+                          <button
+                            class="btn-ghost btn-sm"
+                            :disabled="ragLoading || !doc.xaiFileId"
+                            @click="previewRagDocAction(doc)"
+                            title="Preview from xAI"
+                          >
+                            Preview
+                          </button>
                           <button
                             v-if="doc.syncStatus !== 'deleted'"
                             class="btn-danger btn-sm"
@@ -1862,7 +1929,9 @@ onMounted(async () => {
                   >
                     Previous
                   </button>
-                  <p class="msg-muted">Page {{ ragCursorHistory.length + 1 }}</p>
+                  <p class="msg-muted">
+                    Page {{ ragCursorHistory.length + 1 }}
+                  </p>
                   <button
                     class="btn-ghost btn-sm"
                     :disabled="ragLoading || !ragNextCursor"
@@ -1874,6 +1943,29 @@ onMounted(async () => {
               </template>
             </template>
           </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div
+      v-if="showPreviewModal"
+      class="overlay"
+      @click.self="showPreviewModal = false"
+    >
+      <div
+        class="modal-card modal-card-wide"
+        style="max-height: 90vh; display: flex; flex-direction: column"
+      >
+        <h3 class="modal-title">Document Preview</h3>
+        <p v-if="previewLoading" class="msg-muted">
+          Fetching document metadata from KB...
+        </p>
+        <pre v-else class="preview-pre">{{ previewContent }}</pre>
+        <div class="modal-actions" style="margin-top: auto">
+          <button class="btn-primary" @click="showPreviewModal = false">
+            Close
+          </button>
         </div>
       </div>
     </div>
@@ -1932,9 +2024,7 @@ onMounted(async () => {
             :disabled="uploadingEditTenantLogo"
             @change="handleEditTenantLogoUpload"
           />
-          {{
-            uploadingEditTenantLogo ? "Uploading Logo..." : "Upload Logo"
-          }}
+          {{ uploadingEditTenantLogo ? "Uploading Logo..." : "Upload Logo" }}
         </label>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditTenantModal = false">
@@ -2250,6 +2340,7 @@ onMounted(async () => {
 .matrix-panel {
   padding: 1rem;
   overflow-y: auto;
+  min-width: 0;
 }
 
 .workspace-tabs {
@@ -2623,6 +2714,20 @@ onMounted(async () => {
   margin-top: 0.5rem;
   font-size: 0.84rem;
   line-height: 1.55;
+}
+
+.preview-pre {
+  background: rgba(2, 6, 23, 0.8);
+  padding: 0.8rem;
+  border-radius: 0.5rem;
+  color: #e2e8f0;
+  font-size: 0.75rem;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  border: 1px solid rgba(100, 116, 139, 0.45);
 }
 
 .modal-card-wide {

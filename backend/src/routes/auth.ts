@@ -5,6 +5,7 @@ import { db } from "../db.js";
 import { users } from "../../drizzle/schema.js";
 import { hashPassword, verifyPassword } from "../auth.js";
 import { listUserRoleAssignments } from "../repos/access.js";
+import { loginRateLimit } from "../rate-limit.js";
 
 const RegisterSchema = z.object({
   email: z.string().email(),
@@ -49,7 +50,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       .values({
         email: payload.email,
         fullname: normalizeFullname(payload.fullname),
-        passwordHash: hashPassword(payload.password),
+        passwordHash: await hashPassword(payload.password),
       })
       .returning();
 
@@ -64,10 +65,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
-  app.post("/auth/login", async (request, reply) => {
+  app.post("/auth/login", { preHandler: loginRateLimit }, async (request, reply) => {
     const payload = RegisterSchema.parse(request.body);
     const user = await db.query.users.findFirst({ where: eq(users.email, payload.email) });
-    if (!user || !verifyPassword(payload.password, user.passwordHash)) {
+    if (!user || !(await verifyPassword(payload.password, user.passwordHash))) {
       return reply.code(401).send({ message: "Invalid credentials" });
     }
 

@@ -14,8 +14,13 @@ const CleanedSegmentSchema = z.object({
 const EvaluationItemSchema = z.object({
   row_index: z.number().int(),
   evidence_timestamp: z.string(),
-  note: z.string(),
+  reasoning: z
+    .string()
+    .describe(
+      "Your logical chain of thought explaining how the RAG rules & transcript support the score.",
+    ),
   score: z.number(),
+  note: z.string(),
 });
 
 const ConversationAnalysisSchema = z.object({
@@ -105,8 +110,11 @@ export const analyzeConversation = async (
   const ragGuidanceText = String(ragGuidance || "").trim();
   const ragGuidanceBlock = ragGuidanceText
     ? `
-Project Knowledge Base Docs (hasil koreksi manual QA sebelumnya):
+CRITICAL: Project Knowledge Base Docs (Manual QA Corrections):
 ${ragGuidanceText}
+
+YOU MUST TREAT THE ABOVE "Project Knowledge Base Docs" AS ABSOLUTE TRUTH.
+If they state a certain wording or behavior is permitted (e.g., saying X instead of Y is allowed), you MUST NOT penalize it and you MUST give the full valid score.
 `
     : "";
 
@@ -116,26 +124,26 @@ ${ragGuidanceText}
     const result = await generateObject({
       model: xai(model),
       schema: ConversationAnalysisSchema,
+      temperature: 0,
       system: `
 You are a QA analyst for Indonesian customer service calls (${callType} type).
 Output concise Bahasa Indonesia. Be factual, no repetition.
 
 Evaluation Matrix Criteria (with Max Weights):
 ${criteriaList}
-${ragGuidanceBlock}
 
 Rules:
-- Jika ada panduan dari Knowledge Base Docs, gunakan sebagai referensi pola keputusan.
-- Jika ada konflik antara panduan dan bukti transcript/matrix aktif, prioritaskan transcript + matrix aktif.
 - transcript_cleanup: role must be CS or Customer, keep meaning, remove fillers, keep each cleaned_text short.
-- qa_scorecard.evaluation_table: return compact rows ONLY with row_index, score, note, evidence_timestamp.
+- qa_scorecard.evaluation_table: return compact rows ONLY with row_index, reasoning, score, note, evidence_timestamp.
   - Evaluate each matrix row index from the list above.
+  - reasoning: Explain step-by-step why they get this score, strictly referencing the RAG rules and the transcript. Do this before assigning the score.
   - Do not repeat area/parameter/description in output.
   - score must be strictly 0 OR max_weight for that row.
   - If not applicable, use note "N/A" and give full score.
 - Important: final CE scoring policy can be applied server-side after your output.
 - evidence_timestamp: copy exact "MM:SS - MM:SS" from transcript lines, otherwise "N/A".
 - Keep summary and notes short, factual, and evidence-based.
+${ragGuidanceBlock}
 `,
       prompt: `Analyze transcript lines in this format: [id] start - end speaker: text\n\n${transcriptText}`,
     });
@@ -172,6 +180,7 @@ Rules:
       parameter: string;
       description: string;
       evidence_timestamp: string;
+      reasoning: string;
       note: string;
       score: number;
       max_score: number;
@@ -215,6 +224,7 @@ Rules:
       parameter: matrix.parameter,
       description: matrix.description,
       evidence_timestamp: normalizedTimestamp,
+      reasoning: String(row.reasoning || "").trim(),
       note: String(row.note || "").trim() || "N/A",
       score: normalizedScore,
       max_score: maxScore,
@@ -232,6 +242,7 @@ Rules:
       parameter: matrix.parameter,
       description: matrix.description,
       evidence_timestamp: "N/A",
+      reasoning: "No analysis provided.",
       note: "N/A",
       score: Number(matrix.weight || 0),
       max_score: Number(matrix.weight || 0),

@@ -1,9 +1,9 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { FastifyPluginAsync } from "fastify";
 import { basename, extname } from "node:path";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { db } from "../db.js";
 import {
   batches,
@@ -24,6 +24,8 @@ import {
 } from "../repos/access.js";
 import { deleteUploadFile, saveUpload } from "../storage.js";
 import { boss, QUEUES } from "../queue.js";
+import { runWithConcurrency } from "../utils/concurrency.js";
+import { uploadRateLimit } from "../rate-limit.js";
 type CallType = "inbound" | "outbound";
 
 const ACTIVE_JOB_STATUSES = ["queued", "uploading", "transcribing", "analyzing"] as const;
@@ -33,9 +35,25 @@ const BATCH_HISTORY_LOCKED_MESSAGE =
 const STRICT_CE_POLICY = "strict_zero_all_ce_if_any_fail" as const;
 const SCORE_EDIT_SOURCE_MANUAL = "manual" as const;
 const SCORE_EDIT_SOURCE_STRICT_AUTO = "ce_strict_auto" as const;
+const ENQUEUE_CONCURRENCY = 10;
+const FILE_DELETE_CONCURRENCY = 10;
+const resolveAudioContentType = (fileName: string) => {
+  const ext = extname(fileName).toLowerCase();
+  return ext === ".wav"
+    ? "audio/wav"
+    : ext === ".m4a"
+      ? "audio/mp4"
+      : ext === ".mp3"
+        ? "audio/mpeg"
+        : "application/octet-stream";
+};
 const resolveUserFullname = (value: string | null | undefined) => {
   const name = String(value || "").trim();
   return name || "User";
+};
+const normalizeBatchName = (value: string | null | undefined) => {
+  const name = String(value || "").trim();
+  return name || null;
 };
 
 const normalizeBatchHistoryLockDays = (value: number | null | undefined) => {
@@ -54,12 +72,35 @@ const getBatchLockMeta = (createdAt: Date, lockDays: number) => {
 };
 
 export const jobRoutes: FastifyPluginAsync = async (app) => {
-  const hasActiveJobsInBatch = async (batchId: string) => {
-    const activeJob = await db.query.jobs.findFirst({
-      where: and(eq(jobs.batchId, batchId), inArray(jobs.status, [...ACTIVE_JOB_STATUSES])),
-      columns: { id: true },
+  const enqueueTranscribeJobs = async (jobIds: string[]) => {
+    await runWithConcurrency(jobIds, ENQUEUE_CONCURRENCY, async (jobId) => {
+      await boss.send(
+        QUEUES.TRANSCRIBE,
+        { jobId },
+        { retryLimit: 3, retryDelay: 20, retryBackoff: true },
+      );
     });
-    return Boolean(activeJob);
+  };
+
+  const deleteFilesBestEffort = async (filePaths: string[]) => {
+    const failedDeletes: string[] = [];
+    await runWithConcurrency(
+      filePaths,
+      FILE_DELETE_CONCURRENCY,
+      async (filePath) => {
+        try {
+          await deleteUploadFile(filePath);
+        } catch {
+          failedDeletes.push(filePath);
+        }
+      },
+    );
+    if (failedDeletes.length > 0) {
+      app.log.warn(
+        { failedDeletes: failedDeletes.length },
+        "Some uploaded files could not be deleted",
+      );
+    }
   };
 
   app.get(
@@ -90,21 +131,33 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       const creatorsById = new Map(creators.map((user) => [user.id, user]));
 
       const batchIds = projectBatches.map((batch) => batch.id);
-      const allJobs =
+      const jobStats =
         batchIds.length > 0
-          ? await db.query.jobs.findMany({
-              where: inArray(jobs.batchId, batchIds),
-            })
+          ? await db
+              .select({
+                batchId: jobs.batchId,
+                totalJobs: sql<number>`count(*)::int`,
+                completedJobs: sql<number>`count(*) filter (where ${jobs.status} = 'completed')::int`,
+                failedJobs: sql<number>`count(*) filter (where ${jobs.status} = 'failed')::int`,
+              })
+              .from(jobs)
+              .where(inArray(jobs.batchId, batchIds))
+              .groupBy(jobs.batchId)
           : [];
+      const statsByBatchId = new Map(
+        jobStats.map((row) => [row.batchId, row]),
+      );
 
       return projectBatches.map((batch) => {
-        const batchJobs = allJobs.filter((job) => job.batchId === batch.id);
-        const completedJobs = batchJobs.filter((job) => job.status === "completed").length;
-        const failedJobs = batchJobs.filter((job) => job.status === "failed").length;
+        const stat = statsByBatchId.get(batch.id);
+        const totalJobs = Number(stat?.totalJobs || 0);
+        const completedJobs = Number(stat?.completedJobs || 0);
+        const failedJobs = Number(stat?.failedJobs || 0);
         return {
           id: batch.id,
           tenantId: batch.tenantId,
           projectId: batch.projectId,
+          name: batch.name,
           callType: batch.callType,
           status: batch.status,
           createdAt: batch.createdAt,
@@ -114,11 +167,56 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
             creatorsById.get(batch.userId)?.fullname,
           ),
           ...getBatchLockMeta(batch.createdAt, lockDays),
-          totalJobs: batchJobs.length,
+          totalJobs,
           completedJobs,
           failedJobs,
         };
       });
+    },
+  );
+
+  app.get(
+    "/projects/:projectId/batches/summary",
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const userId = (request.user as any).sub as string;
+      const params = z.object({ projectId: z.string().uuid() }).parse(request.params);
+      const project = await db.query.projects.findFirst({
+        where: eq(projects.id, params.projectId),
+      });
+      if (!project) {
+        return reply.code(404).send({ message: "Project not found" });
+      }
+      await assertProjectPermission(project.tenantId, project.id, userId, "qa.read");
+
+      const [batchAggregate, jobAggregate] = await Promise.all([
+        db
+          .select({
+            totalBatches: sql<number>`count(*)::int`,
+          })
+          .from(batches)
+          .where(eq(batches.projectId, params.projectId)),
+        db
+          .select({
+            totalJobs: sql<number>`count(*)::int`,
+            completedJobs: sql<number>`count(*) filter (where ${jobs.status} = 'completed')::int`,
+            failedJobs: sql<number>`count(*) filter (where ${jobs.status} = 'failed')::int`,
+            runningJobs: sql<number>`count(*) filter (where ${jobs.status} in ('uploading', 'transcribing', 'analyzing'))::int`,
+            queuedJobs: sql<number>`count(*) filter (where ${jobs.status} = 'queued')::int`,
+          })
+          .from(jobs)
+          .where(eq(jobs.projectId, params.projectId)),
+      ]);
+
+      return {
+        projectId: params.projectId,
+        totalBatches: Number(batchAggregate[0]?.totalBatches || 0),
+        totalJobs: Number(jobAggregate[0]?.totalJobs || 0),
+        completedJobs: Number(jobAggregate[0]?.completedJobs || 0),
+        failedJobs: Number(jobAggregate[0]?.failedJobs || 0),
+        runningJobs: Number(jobAggregate[0]?.runningJobs || 0),
+        queuedJobs: Number(jobAggregate[0]?.queuedJobs || 0),
+      };
     },
   );
 
@@ -160,6 +258,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
           tenantId: payload.tenantId,
           projectId: params.projectId,
           userId: (request.user as any).sub,
+          name: normalizeBatchName(payload.name),
           callType: payload.callType,
           status: "queued",
         })
@@ -169,6 +268,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         id: batch.id,
         tenantId: batch.tenantId,
         projectId: batch.projectId,
+        name: batch.name,
         callType: batch.callType,
         status: batch.status,
         createdAt: batch.createdAt,
@@ -177,11 +277,15 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.post("/batches", { preHandler: app.authenticate }, async (request, reply) => {
+  app.post(
+    "/batches",
+    { preHandler: [app.authenticate, uploadRateLimit] },
+    async (request, reply) => {
     const files: Array<{ fileName: string; filePath: string }> = [];
     let tenantId = "";
     let projectId = "";
     let callType = "inbound" as CallType;
+    let batchName = "";
 
     const parts = request.parts();
     for await (const part of parts) {
@@ -192,6 +296,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         if (part.fieldname === "tenantId") tenantId = String(part.value ?? "");
         if (part.fieldname === "projectId") projectId = String(part.value ?? "");
         if (part.fieldname === "callType") callType = z.enum(["inbound", "outbound"]).parse(part.value);
+        if (part.fieldname === "name") batchName = String(part.value ?? "");
       }
     }
 
@@ -224,6 +329,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
         tenantId: tenantUuid,
         projectId: projectUuid,
         userId: (request.user as any).sub,
+        name: normalizeBatchName(batchName),
         callType,
         status: "queued",
       })
@@ -248,21 +354,19 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       )
       .returning();
 
-    for (const job of createdJobs) {
-      await boss.send(
-        QUEUES.TRANSCRIBE,
-        { jobId: job.id },
-        { retryLimit: 3, retryDelay: 20, retryBackoff: true },
-      );
-    }
+    await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
 
     return {
       batchId: batch.id,
       jobIds: createdJobs.map((j) => j.id),
     };
-  });
+    },
+  );
 
-  app.post("/batches/:batchId/files", { preHandler: app.authenticate }, async (request, reply) => {
+  app.post(
+    "/batches/:batchId/files",
+    { preHandler: [app.authenticate, uploadRateLimit] },
+    async (request, reply) => {
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
     const files: Array<{ fileName: string; filePath: string }> = [];
     let analyzeNow = true;
@@ -329,13 +433,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       .where(eq(batches.id, batch.id));
 
     if (analyzeNow) {
-      for (const job of createdJobs) {
-        await boss.send(
-          QUEUES.TRANSCRIBE,
-          { jobId: job.id },
-          { retryLimit: 3, retryDelay: 20, retryBackoff: true },
-        );
-      }
+      await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
     }
 
     return {
@@ -372,13 +470,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true, enqueued: 0 };
     }
 
-    for (const job of queuedJobs) {
-      await boss.send(
-        QUEUES.TRANSCRIBE,
-        { jobId: job.id },
-        { retryLimit: 3, retryDelay: 20, retryBackoff: true },
-      );
-    }
+    await enqueueTranscribeJobs(queuedJobs.map((job) => job.id));
 
     await db
       .update(batches)
@@ -430,10 +522,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
     if (!isEmptyBatch) {
       const jobIds = batchJobs.map((job) => job.id);
-
-      for (const job of batchJobs) {
-        await deleteUploadFile(job.filePath);
-      }
+      await deleteFilesBestEffort(batchJobs.map((job) => job.filePath));
 
       await db.delete(jobScoreEditHistory).where(inArray(jobScoreEditHistory.jobId, jobIds));
       await db.delete(jobEvaluationRows).where(inArray(jobEvaluationRows.jobId, jobIds));
@@ -445,6 +534,46 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
     await db.delete(batches).where(eq(batches.id, batch.id));
     return { ok: true };
+  });
+
+  app.patch("/batches/:batchId/name", { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as any).sub as string;
+    const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        name: z.string().trim().min(1).max(255),
+      })
+      .parse(request.body);
+
+    const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
+    if (!batch) {
+      return reply.code(404).send({ message: "Batch not found" });
+    }
+
+    await assertProjectPermission(batch.tenantId, batch.projectId, userId, "jobs:manage");
+
+    const nextName = normalizeBatchName(body.name);
+    if (!nextName) {
+      return reply.code(400).send({ message: "Batch name is required" });
+    }
+
+    const [updated] = await db
+      .update(batches)
+      .set({
+        name: nextName,
+        updatedAt: new Date(),
+      })
+      .where(eq(batches.id, batch.id))
+      .returning({
+        id: batches.id,
+        name: batches.name,
+      });
+
+    return {
+      ok: true,
+      id: updated?.id || batch.id,
+      name: updated?.name || nextName,
+    };
   });
 
   app.get("/batches/:batchId", { preHandler: app.authenticate }, async (request, reply) => {
@@ -473,11 +602,18 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       where: eq(jobs.batchId, params.batchId),
       orderBy: (t, { asc }) => [asc(t.createdAt)],
     });
+    const completedJobs = batchJobs.filter((job) => job.status === "completed").length;
+    const failedJobs = batchJobs.filter((job) => job.status === "failed").length;
+    const runningJobs = batchJobs.filter((job) =>
+      ["uploading", "transcribing", "analyzing"].includes(job.status),
+    ).length;
+    const queuedJobs = batchJobs.filter((job) => job.status === "queued").length;
 
     return {
       id: batch.id,
       tenantId: batch.tenantId,
       projectId: batch.projectId,
+      name: batch.name,
       callType: batch.callType,
       status: batch.status,
       createdAt: batch.createdAt,
@@ -485,6 +621,11 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       createdBy: batch.userId,
       createdByFullname: resolveUserFullname(creator?.fullname),
       ...lockMeta,
+      totalJobs: batchJobs.length,
+      completedJobs,
+      failedJobs,
+      runningJobs,
+      queuedJobs,
       jobs: batchJobs.map((j) => ({
         id: j.id,
         status: j.status,
@@ -579,7 +720,8 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       updatedAt: job.updatedAt,
       errorMessage: job.errorMessage,
     };
-  });
+    },
+  );
 
   app.patch("/jobs/:jobId/scores", { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as any).sub as string;
@@ -787,16 +929,22 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
 
     let ragEnqueued = 0;
     if (body.addToRag) {
-      for (const entry of insertedHistory) {
-        if (entry.changeSource !== SCORE_EDIT_SOURCE_MANUAL) continue;
-        await boss.send(QUEUES.RAG_SYNC_CORRECTION, {
-          scoreEditHistoryId: entry.id,
-          jobId: job.id,
-          tenantId: job.tenantId,
-          projectId: job.projectId,
-        });
-        ragEnqueued += 1;
-      }
+      const manualEntries = insertedHistory.filter(
+        (entry) => entry.changeSource === SCORE_EDIT_SOURCE_MANUAL,
+      );
+      await runWithConcurrency(
+        manualEntries,
+        ENQUEUE_CONCURRENCY,
+        async (entry) => {
+          await boss.send(QUEUES.RAG_SYNC_CORRECTION, {
+            scoreEditHistoryId: entry.id,
+            jobId: job.id,
+            tenantId: job.tenantId,
+            projectId: job.projectId,
+          });
+        },
+      );
+      ragEnqueued = manualEntries.length;
     }
 
     return {
@@ -846,25 +994,9 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }));
   });
 
-  app.get("/jobs/:jobId/audio", async (request: any, reply) => {
+  app.get("/jobs/:jobId/audio", { preHandler: app.authenticate }, async (request: any, reply) => {
     const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
-    const query = z.object({ token: z.string().optional() }).parse(request.query);
-
-    let userId = "";
-    try {
-      await request.jwtVerify();
-      userId = (request.user as any).sub;
-    } catch {
-      if (!query.token) {
-        return reply.code(401).send({ message: "Unauthorized" });
-      }
-      try {
-        const decoded = await app.jwt.verify(query.token);
-        userId = (decoded as any).sub;
-      } catch {
-        return reply.code(401).send({ message: "Unauthorized" });
-      }
-    }
+    const userId = (request.user as any).sub as string;
 
     const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
     if (!job) {
@@ -872,20 +1004,7 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await assertProjectPermission(job.tenantId, job.projectId, userId, "qa.read");
-    const batch = await db.query.batches.findFirst({
-      where: eq(batches.id, job.batchId),
-      columns: { id: true, userId: true },
-    });
-
-    const ext = extname(job.fileName).toLowerCase();
-    const contentType =
-      ext === ".wav"
-        ? "audio/wav"
-        : ext === ".m4a"
-          ? "audio/mp4"
-          : ext === ".mp3"
-            ? "audio/mpeg"
-            : "application/octet-stream";
+    const contentType = resolveAudioContentType(job.fileName);
 
     try {
       const fileStat = await stat(job.filePath);
@@ -924,6 +1043,36 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Content-Length", String(fileSize));
       return reply.send(createReadStream(job.filePath));
     } catch {
+      return reply.code(404).send({ message: "Audio file not found" });
+    }
+  });
+
+  app.get("/jobs/:jobId/audio-blob", { preHandler: app.authenticate }, async (request: any, reply) => {
+    const params = z.object({ jobId: z.string().uuid() }).parse(request.params);
+    const userId = (request.user as any).sub as string;
+
+    const job = await db.query.jobs.findFirst({ where: eq(jobs.id, params.jobId) });
+    if (!job) {
+      return reply.code(404).send({ message: "Job not found" });
+    }
+
+    await assertProjectPermission(job.tenantId, job.projectId, userId, "qa.read");
+    const contentType = resolveAudioContentType(job.fileName);
+
+    try {
+      const audioBuffer = await readFile(job.filePath);
+      reply.header("Content-Type", "application/octet-stream");
+      reply.header("X-Audio-Content-Type", contentType);
+      reply.header("Cache-Control", "no-store");
+      reply.header("Content-Length", String(audioBuffer.byteLength));
+      return reply.send(audioBuffer);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") {
+        app.log.warn(
+          { jobId: job.id, error: error?.message || "unknown" },
+          "Failed to read job audio blob",
+        );
+      }
       return reply.code(404).send({ message: "Audio file not found" });
     }
   });

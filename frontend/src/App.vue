@@ -3,7 +3,8 @@ import { ref, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Mic, LayoutDashboard, Users, Settings, LogOut } from "lucide-vue-next";
 import { useSession } from "./services/session";
-import { getAuthMe } from "./services/backendApi";
+import { getAuthMeCached } from "./services/backendApi";
+import AskNextoWidget from "./components/AskNextoWidget.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -36,7 +37,7 @@ const refreshSettingsAccess = async () => {
   }
 
   try {
-    const me = await getAuthMe();
+    const me = await getAuthMeCached();
     if (!me.isRestricted) {
       canAccessSettings.value = true;
       canAccessManage.value = true;
@@ -157,6 +158,8 @@ watch(
     >
       <RouterView />
     </main>
+
+    <AskNextoWidget v-if="isAuthenticated && !isLoginPage" />
 
     <!-- Custom Logout Confirmation Modal -->
     <div

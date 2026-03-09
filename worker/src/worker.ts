@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -34,6 +34,24 @@ const WEIGHTED_CE_POLICY = "weighted_ce_independent" as const;
 
 const boss = new PgBoss({ connectionString: env.DATABASE_URL });
 const moduleDir = dirname(fileURLToPath(import.meta.url));
+type ProviderConfig = {
+  elevenlabsApiKey: string;
+  xaiApiKey: string;
+  xaiModel: string;
+  xaiManagementApiKey?: string;
+  xaiRagModel: string;
+};
+type BatchJobCounts = {
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  transcribing: number;
+  analyzing: number;
+  uploading: number;
+  queued: number;
+};
+let providerConfigCache: { value: ProviderConfig; expiresAt: number } | null = null;
 
 const extractJobIdFromPayload = (payload: unknown): string | null => {
   const jobLike = Array.isArray(payload) ? payload[0] : payload;
@@ -76,6 +94,10 @@ const emitWsEvent = async (event: Record<string, unknown>) => {
 };
 
 const getProviderConfig = async () => {
+  if (providerConfigCache && providerConfigCache.expiresAt > Date.now()) {
+    return providerConfigCache.value;
+  }
+
   const settings = await db.query.globalProviderSettings.findFirst({
     orderBy: (t, { desc }) => [desc(t.updatedAt)],
   });
@@ -90,31 +112,62 @@ const getProviderConfig = async () => {
   if (!elevenlabsApiKey) throw new Error("Missing global ElevenLabs API key");
   if (!xaiApiKey) throw new Error("Missing global xAI API key");
 
-  return {
+  const nextConfig = {
     elevenlabsApiKey,
     xaiApiKey,
     xaiModel,
     xaiManagementApiKey,
     xaiRagModel,
   };
+  providerConfigCache = {
+    value: nextConfig,
+    expiresAt: Date.now() + env.WORKER_PROVIDER_CACHE_TTL_MS,
+  };
+  return nextConfig;
 };
 
-const publishBatchProgress = async (batchId: string, tenantId: string, projectId: string) => {
-  const batchJobs = await db.query.jobs.findMany({ where: eq(jobs.batchId, batchId) });
-  const total = batchJobs.length;
-  const completed = batchJobs.filter((job) => job.status === "completed").length;
-  const failed = batchJobs.filter((job) => job.status === "failed").length;
-  const running = batchJobs.filter((job) => ["uploading", "transcribing", "analyzing"].includes(job.status)).length;
+const queryBatchJobCounts = async (batchId: string): Promise<BatchJobCounts> => {
+  const [counts] = await db
+    .select({
+      total: sql<number>`count(*)::int`,
+      completed: sql<number>`count(*) filter (where ${jobs.status} = 'completed')::int`,
+      failed: sql<number>`count(*) filter (where ${jobs.status} = 'failed')::int`,
+      running: sql<number>`count(*) filter (where ${jobs.status} in ('uploading', 'transcribing', 'analyzing'))::int`,
+      transcribing: sql<number>`count(*) filter (where ${jobs.status} = 'transcribing')::int`,
+      analyzing: sql<number>`count(*) filter (where ${jobs.status} = 'analyzing')::int`,
+      uploading: sql<number>`count(*) filter (where ${jobs.status} = 'uploading')::int`,
+      queued: sql<number>`count(*) filter (where ${jobs.status} = 'queued')::int`,
+    })
+    .from(jobs)
+    .where(eq(jobs.batchId, batchId));
 
+  return {
+    total: Number(counts?.total || 0),
+    completed: Number(counts?.completed || 0),
+    failed: Number(counts?.failed || 0),
+    running: Number(counts?.running || 0),
+    transcribing: Number(counts?.transcribing || 0),
+    analyzing: Number(counts?.analyzing || 0),
+    uploading: Number(counts?.uploading || 0),
+    queued: Number(counts?.queued || 0),
+  };
+};
+
+const publishBatchProgress = async (
+  batchId: string,
+  tenantId: string,
+  projectId: string,
+  counts: BatchJobCounts,
+) => {
   await emitWsEvent({
     event: "batch.progress",
     tenantId,
     projectId,
     batchId,
-    total,
-    completed,
-    failed,
-    running,
+    total: counts.total,
+    completed: counts.completed,
+    failed: counts.failed,
+    running: counts.running,
     updatedAt: new Date().toISOString(),
   });
 };
@@ -174,25 +227,85 @@ const updateJobStatus = async (
     });
   }
 
-  await publishBatchProgress(job.batchId, job.tenantId, job.projectId);
-  await maybeUpdateBatchStatus(job.batchId);
+  const counts = await queryBatchJobCounts(job.batchId);
+  await publishBatchProgress(job.batchId, job.tenantId, job.projectId, counts);
+  await maybeUpdateBatchStatus(job.batchId, counts);
 };
 
-const maybeUpdateBatchStatus = async (batchId: string) => {
-  const rows = await db.query.jobs.findMany({ where: eq(jobs.batchId, batchId) });
-  if (!rows.length) return;
-
+const maybeUpdateBatchStatus = async (
+  batchId: string,
+  counts?: BatchJobCounts,
+) => {
+  const batchCounts = counts ?? (await queryBatchJobCounts(batchId));
+  if (!batchCounts.total) return;
   let status: "queued" | "uploading" | "transcribing" | "analyzing" | "completed" | "failed" = "queued";
-  if (rows.every((row) => row.status === "completed")) status = "completed";
-  else if (rows.some((row) => row.status === "failed")) status = "failed";
-  else if (rows.some((row) => row.status === "analyzing")) status = "analyzing";
-  else if (rows.some((row) => row.status === "transcribing")) status = "transcribing";
-  else if (rows.some((row) => row.status === "uploading")) status = "uploading";
+  if (batchCounts.completed === batchCounts.total) status = "completed";
+  else if (batchCounts.failed > 0) status = "failed";
+  else if (batchCounts.analyzing > 0) status = "analyzing";
+  else if (batchCounts.transcribing > 0) status = "transcribing";
+  else if (batchCounts.uploading > 0) status = "uploading";
 
   await db
     .update(batches)
     .set({ status, updatedAt: new Date() })
     .where(eq(batches.id, batchId));
+};
+
+const buildWorkOptions = (input: {
+  localConcurrency: number;
+  batchSize: number;
+  pollingIntervalSeconds?: number;
+}) => ({
+  localConcurrency: Math.max(1, Math.floor(input.localConcurrency || 1)),
+  batchSize: Math.max(1, Math.floor(input.batchSize || 1)),
+  pollingIntervalSeconds:
+    input.pollingIntervalSeconds ?? env.WORKER_POLLING_INTERVAL_SECONDS,
+});
+
+const applyTranscriptCleanup = async (
+  jobId: string,
+  cleanup: Array<{ id: number; role: "CS" | "Customer"; cleaned_text: string }>,
+) => {
+  const updates = cleanup
+    .map((entry) => ({
+      id: Number(entry.id),
+      role: entry.role,
+      cleanedText: String(entry.cleaned_text || ""),
+    }))
+    .filter(
+      (entry) =>
+        Number.isInteger(entry.id) &&
+        entry.id >= 0 &&
+        (entry.role === "CS" || entry.role === "Customer"),
+    );
+
+  if (!updates.length) return;
+
+  const payload = JSON.stringify(
+    updates.map((entry) => ({
+      segment_index: entry.id,
+      next_role: entry.role,
+      next_cleaned_text: entry.cleanedText,
+    })),
+  );
+
+  await db.execute(sql`
+    UPDATE ${jobSegments} AS js
+    SET
+      role = v.next_role,
+      cleaned_text = v.next_cleaned_text,
+      sentiment = NULL
+    FROM (
+      SELECT *
+      FROM jsonb_to_recordset(${payload}::jsonb) AS x(
+        segment_index integer,
+        next_role text,
+        next_cleaned_text text
+      )
+    ) AS v
+    WHERE js.job_id = ${jobId}
+      AND js.segment_index = v.segment_index
+  `);
 };
 
 const start = async () => {
@@ -203,7 +316,15 @@ const start = async () => {
   await boss.createQueue(QUEUES.RAG_SYNC_CORRECTION);
   await boss.createQueue(QUEUES.WS_EVENTS);
 
-  await boss.work(QUEUES.TRANSCRIBE, async (payload: any) => {
+  await boss.work(
+    QUEUES.TRANSCRIBE,
+    buildWorkOptions({
+      localConcurrency: env.WORKER_TRANSCRIBE_LOCAL_CONCURRENCY,
+      batchSize: env.WORKER_TRANSCRIBE_BATCH_SIZE,
+      pollingIntervalSeconds:
+        env.WORKER_TRANSCRIBE_POLLING_INTERVAL_SECONDS,
+    }),
+    async (payload: any) => {
     const jobId = extractJobIdFromPayload(payload);
     if (!jobId) {
       throw new Error("Invalid transcribe payload: missing jobId");
@@ -253,9 +374,17 @@ const start = async () => {
       // Keep failed state final; manual retry is handled by API/UI.
       return;
     }
-  });
+    },
+  );
 
-  await boss.work(QUEUES.ANALYZE, async (payload: any) => {
+  await boss.work(
+    QUEUES.ANALYZE,
+    buildWorkOptions({
+      localConcurrency: env.WORKER_ANALYZE_LOCAL_CONCURRENCY,
+      batchSize: env.WORKER_ANALYZE_BATCH_SIZE,
+      pollingIntervalSeconds: env.WORKER_ANALYZE_POLLING_INTERVAL_SECONDS,
+    }),
+    async (payload: any) => {
     const jobId = extractJobIdFromPayload(payload);
     if (!jobId) {
       throw new Error("Invalid analyze payload: missing jobId");
@@ -343,18 +472,7 @@ const start = async () => {
         evaluation_table: adjustedEvaluationTable,
       };
 
-      for (let idx = 0; idx < segments.length; idx++) {
-        const cleaned = result.transcript_cleanup.find((c) => c.id === idx);
-        if (!cleaned) continue;
-        await db
-          .update(jobSegments)
-          .set({
-            role: cleaned.role,
-            cleanedText: cleaned.cleaned_text,
-            sentiment: null,
-          })
-          .where(and(eq(jobSegments.jobId, jobId), eq(jobSegments.segmentIndex, idx)));
-      }
+      await applyTranscriptCleanup(jobId, result.transcript_cleanup);
 
       const totalScore = adjustedEvaluationTable.reduce(
         (sum, row) => sum + Number(row.score || 0),
@@ -391,9 +509,17 @@ const start = async () => {
       // Keep failed state final; manual retry is handled by API/UI.
       return;
     }
-  });
+    },
+  );
 
-  await boss.work(QUEUES.RAG_SYNC_CORRECTION, async (payload: any) => {
+  await boss.work(
+    QUEUES.RAG_SYNC_CORRECTION,
+    buildWorkOptions({
+      localConcurrency: env.WORKER_RAG_LOCAL_CONCURRENCY,
+      batchSize: env.WORKER_RAG_BATCH_SIZE,
+      pollingIntervalSeconds: env.WORKER_RAG_POLLING_INTERVAL_SECONDS,
+    }),
+    async (payload: any) => {
     const scoreEditHistoryId = extractFieldFromPayload(payload, "scoreEditHistoryId");
     if (!scoreEditHistoryId) {
       throw new Error("Invalid RAG sync payload: missing scoreEditHistoryId");
@@ -404,9 +530,17 @@ const start = async () => {
       scoreEditHistoryId,
       managementApiKey: String(provider.xaiManagementApiKey || ""),
     });
-  });
+    },
+  );
 
-  await boss.work(QUEUES.FINALIZE, async (payload: any) => {
+  await boss.work(
+    QUEUES.FINALIZE,
+    buildWorkOptions({
+      localConcurrency: env.WORKER_FINALIZE_LOCAL_CONCURRENCY,
+      batchSize: env.WORKER_FINALIZE_BATCH_SIZE,
+      pollingIntervalSeconds: env.WORKER_FINALIZE_POLLING_INTERVAL_SECONDS,
+    }),
+    async (payload: any) => {
     const jobId = extractJobIdFromPayload(payload);
     if (!jobId) {
       throw new Error("Invalid finalize payload: missing jobId");
@@ -415,7 +549,8 @@ const start = async () => {
     if (!current) return;
 
     await updateJobStatus(jobId, "completed", 100, null);
-  });
+    },
+  );
 
   console.log("Worker is running");
 };
