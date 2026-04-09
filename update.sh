@@ -20,7 +20,20 @@ cleanup_migrate_image() {
 }
 
 require_command docker
-require_command git
+
+pull_latest_if_git_repo() {
+  if ! command -v git >/dev/null 2>&1; then
+    echo "Git not found; skipping git pull and using current files."
+    return
+  fi
+
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git pull --ff-only
+    return
+  fi
+
+  echo "No git repository detected; skipping git pull and using current files."
+}
 
 compose_args=()
 
@@ -52,7 +65,7 @@ fi
 
 cd "$ROOT_DIR"
 
-git pull --ff-only
+pull_latest_if_git_repo
 set_compose_args
 
 docker compose "${compose_args[@]}" build
