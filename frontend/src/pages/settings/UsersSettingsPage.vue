@@ -269,14 +269,38 @@ const currentUserAccessAssignments = (user: SettingsUser) =>
 const load = async (preferredUserId?: string) => {
   loading.value = true;
   try {
-    const [usersData, rolesData, tenantsData] = await Promise.all([
+    const [usersResult, rolesResult, tenantsResult] = await Promise.allSettled([
       listSettingsUsers(),
       listAccessRoles(),
       listTenants(),
     ]);
+
+    if (usersResult.status !== "fulfilled") {
+      throw usersResult.reason;
+    }
+
+    const usersData = usersResult.value;
+    const rolesData = rolesResult.status === "fulfilled" ? rolesResult.value : [];
+    const tenantsData = tenantsResult.status === "fulfilled" ? tenantsResult.value : [];
+
     users.value = usersData;
     roles.value = rolesData;
     tenants.value = tenantsData;
+
+    if (rolesResult.status !== "fulfilled") {
+      toast.error(
+        rolesResult.reason instanceof Error
+          ? rolesResult.reason.message
+          : "Failed to load role options",
+      );
+    }
+    if (tenantsResult.status !== "fulfilled") {
+      toast.error(
+        tenantsResult.reason instanceof Error
+          ? tenantsResult.reason.message
+          : "Failed to load tenant options",
+      );
+    }
 
     const projectResults = await Promise.allSettled(
       tenantsData.map(async (tenant) => ({

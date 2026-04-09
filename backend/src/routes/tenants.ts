@@ -248,6 +248,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.post("/tenants", { preHandler: app.authenticate }, async (request) => {
+    await assertSystemPermission((request.user as any).sub, "tenants:manage");
     const payload = CreateTenantSchema.parse(request.body);
 
     const [tenant] = await db
@@ -405,6 +406,11 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           ceScoringPolicy: payload.ceScoringPolicy,
         })
         .returning();
+
+      await db.insert(projectMemberships).values({
+        projectId: project.id,
+        userId: (request.user as any).sub,
+      });
 
       return project;
     },

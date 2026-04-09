@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db.js";
 import {
   accessRoles,
+  projectMemberships,
   projectMatrixVersions,
   projects,
   tenantMemberships,
@@ -101,6 +102,21 @@ const getUser = async (userId: string) => {
   const user = await db.query.users.findFirst({ where: eq(users.id, userId) });
   if (!user) throw new Error("User not found");
   return user;
+};
+
+const getTenantMembership = async (tenantId: string, userId: string) => {
+  try {
+    return (
+      (await db.query.tenantMemberships.findFirst({
+        where: and(eq(tenantMemberships.tenantId, tenantId), eq(tenantMemberships.userId, userId)),
+      })) ?? null
+    );
+  } catch (error) {
+    if (!isMissingTenantRoleColumnError(error)) {
+      throw error;
+    }
+    return null;
+  }
 };
 
 const getParsedRoleAssignments = async (userId: string): Promise<ParsedRoleAssignment[]> => {
@@ -233,19 +249,7 @@ export const assertTenantAccess = async (
   const requireMembership = Boolean(options?.requireMembership);
   const user = await getUser(userId);
 
-  let membership: TenantAccessResult = null;
-  try {
-    membership = (await db.query.tenantMemberships.findFirst({
-      where: and(eq(tenantMemberships.tenantId, tenantId), eq(tenantMemberships.userId, userId)),
-    })) ?? null;
-  } catch (error) {
-    if (!isMissingTenantRoleColumnError(error)) {
-      throw error;
-    }
-    if (user.isRestricted) {
-      throw new Error("Forbidden tenant access");
-    }
-  }
+  const membership = await getTenantMembership(tenantId, userId);
 
   if (!user.isRestricted) {
     return {
@@ -353,7 +357,7 @@ export const assertProjectAccess = async (
   userId: string,
   options?: { requireMembership?: boolean },
 ) => {
-  await assertTenantAccess(tenantId, userId, options);
+  const tenantAccess = await assertTenantAccess(tenantId, userId, options);
   const project = await db.query.projects.findFirst({
     where: and(eq(projects.id, projectId), eq(projects.tenantId, tenantId)),
   });
@@ -361,6 +365,18 @@ export const assertProjectAccess = async (
 
   const user = await getUser(userId);
   if (!user.isRestricted) {
+    return project;
+  }
+
+  if (tenantAccess && ["owner", "admin"].includes(tenantAccess.role)) {
+    return project;
+  }
+
+  const projectMembership = await db.query.projectMemberships.findFirst({
+    where: and(eq(projectMemberships.projectId, projectId), eq(projectMemberships.userId, userId)),
+    columns: { id: true },
+  });
+  if (projectMembership) {
     return project;
   }
 
@@ -388,7 +404,19 @@ export const listAccessibleProjects = async (tenantId: string, userId: string) =
     });
   }
 
+  const membership = await getTenantMembership(tenantId, userId);
+  if (membership && ["owner", "admin"].includes(membership.role)) {
+    return db.query.projects.findMany({
+      where: eq(projects.tenantId, tenantId),
+    });
+  }
+
   const assignments = await getParsedRoleAssignments(userId);
+  const membershipProjectRows = await db.query.projectMemberships.findMany({
+    where: eq(projectMemberships.userId, userId),
+    columns: { projectId: true },
+  });
+  const membershipProjectIds = membershipProjectRows.map((membershipRow) => membershipRow.projectId);
 
   const relevantAssignments = assignments.filter((assignment) =>
     assignment.permissions.some(
@@ -411,6 +439,9 @@ export const listAccessibleProjects = async (tenantId: string, userId: string) =
   }
 
   const scopedProjectIds = new Set<string>();
+  for (const projectId of membershipProjectIds) {
+    scopedProjectIds.add(projectId);
+  }
   for (const assignment of relevantAssignments) {
     for (const projectId of assignment.scope.projectIds) {
       scopedProjectIds.add(projectId);

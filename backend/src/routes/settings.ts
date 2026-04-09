@@ -335,7 +335,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/settings/roles", { preHandler: app.authenticate }, async (request) => {
-    await assertSystemPermission((request.user as any).sub, "roles:manage");
+    await assertSystemPermission((request.user as any).sub, "settings:view");
 
     const roles = await db
       .select({

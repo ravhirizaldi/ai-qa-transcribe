@@ -72,6 +72,22 @@ export const buildApp = async () => {
   await app.register(websocket);
   await app.register(jwt, { secret: env.JWT_SECRET });
 
+  app.setErrorHandler((error, _request, reply) => {
+    const message = error instanceof Error ? error.message : "Internal server error";
+
+    if (
+      message === "Insufficient permissions" ||
+      message === "Forbidden tenant access" ||
+      message === "Forbidden project access"
+    ) {
+      reply.code(403).send({ message });
+      return;
+    }
+
+    app.log.error(error);
+    reply.code(500).send({ message });
+  });
+
   app.decorate("authenticate", async (request: any, reply: any) => {
     try {
       await request.jwtVerify();
