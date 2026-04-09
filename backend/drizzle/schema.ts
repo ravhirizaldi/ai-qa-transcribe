@@ -115,6 +115,7 @@ export const projects = pgTable(
       .default("strict_zero_all_ce_if_any_fail")
       .notNull(),
     batchHistoryLockDays: integer("batch_history_lock_days").default(2).notNull(),
+    dailyUploadLimit: integer("daily_upload_limit").default(100).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

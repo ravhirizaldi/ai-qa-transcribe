@@ -20,6 +20,8 @@ export const ProjectSchema = z.object({
   supportsInbound: z.boolean(),
   supportsOutbound: z.boolean(),
   batchHistoryLockDays: z.number().int().min(1),
+  dailyUploadLimit: z.number().int().min(1),
+  dailyUploadCount: z.number().int().min(0),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

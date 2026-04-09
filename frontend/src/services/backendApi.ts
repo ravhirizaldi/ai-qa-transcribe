@@ -148,6 +148,8 @@ export type Project = {
   supportsInbound: boolean;
   supportsOutbound: boolean;
   batchHistoryLockDays: number;
+  dailyUploadLimit: number;
+  dailyUploadCount: number;
   ceScoringPolicy: "strict_zero_all_ce_if_any_fail" | "weighted_ce_independent";
 };
 
@@ -463,6 +465,7 @@ export const createProject = async (
     supportsInbound: boolean;
     supportsOutbound: boolean;
     batchHistoryLockDays?: number;
+    dailyUploadLimit?: number;
     ceScoringPolicy?:
       | "strict_zero_all_ce_if_any_fail"
       | "weighted_ce_independent";
@@ -485,6 +488,7 @@ export const updateProject = async (
     supportsInbound?: boolean;
     supportsOutbound?: boolean;
     batchHistoryLockDays?: number;
+    dailyUploadLimit?: number;
     ceScoringPolicy?:
       | "strict_zero_all_ce_if_any_fail"
       | "weighted_ce_independent";

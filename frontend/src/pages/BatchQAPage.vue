@@ -220,6 +220,20 @@ const selectedProject = computed(
     projects.value.find((project) => project.id === selectedProjectId.value) ||
     null,
 );
+const projectDailyUploadLimit = computed(() =>
+  Math.max(1, Number(selectedProject.value?.dailyUploadLimit || 100)),
+);
+const projectDailyUploadCount = computed(() =>
+  Math.max(0, Number(selectedProject.value?.dailyUploadCount || 0)),
+);
+const projectDailyUploadRemaining = computed(() =>
+  Math.max(0, projectDailyUploadLimit.value - projectDailyUploadCount.value),
+);
+const isDailyUploadLimitReached = computed(
+  () =>
+    Boolean(selectedProject.value) &&
+    projectDailyUploadCount.value >= projectDailyUploadLimit.value,
+);
 const showProjectSelector = computed(() => projects.value.length !== 1);
 const workspaceTitle = computed(() => {
   const tenantName = selectedTenant.value?.name || "Tenant Workspace";
@@ -447,6 +461,24 @@ const isBatchLocked = computed(() => {
     hasRunningJobs.value ||
     (lockApplies && hasQueuedJobs.value)
   );
+});
+const uploadBlockedMessage = computed(() => {
+  if (!selectedBatchId.value) {
+    return "Create or select a batch first";
+  }
+  if (!canManageJobs.value) {
+    return "You do not have permission to upload recordings";
+  }
+  if (isBatchViewOnlyLocked.value) {
+    return "This batch is locked and now view-only";
+  }
+  if (isDailyUploadLimitReached.value) {
+    return `Daily project limit reached (${projectDailyUploadCount.value}/${projectDailyUploadLimit.value})`;
+  }
+  if (isBatchLocked.value) {
+    return "Uploads are temporarily unavailable while this batch is processing";
+  }
+  return "Upload is currently unavailable";
 });
 
 const normalizeUuidParam = (value: unknown) => {
@@ -1378,6 +1410,18 @@ const uploadToSelectedBatch = async (files: File[], analyzeNow: boolean) => {
     toast.error("This batch is locked and now view-only.");
     return;
   }
+  if (isDailyUploadLimitReached.value) {
+    toast.error(
+      `Daily upload limit reached (${projectDailyUploadCount.value}/${projectDailyUploadLimit.value}).`,
+    );
+    return;
+  }
+  if (files.length > projectDailyUploadRemaining.value) {
+    toast.error(
+      `Only ${projectDailyUploadRemaining.value} recording(s) remaining for this project today.`,
+    );
+    return;
+  }
 
   uploading.value = true;
   try {
@@ -1389,10 +1433,20 @@ const uploadToSelectedBatch = async (files: File[], analyzeNow: boolean) => {
     toast.success(
       `Uploaded ${result.jobIds.length} recording(s) for later analysis`,
     );
+    if (selectedTenantId.value) {
+      await loadProjectsForTenant(selectedTenantId.value);
+    }
     await loadHistory();
     await loadSelectedBatchDetail();
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : "Upload failed");
+    const message = error instanceof Error ? error.message : "Upload failed";
+    if (
+      selectedTenantId.value &&
+      message.toLowerCase().includes("daily upload limit")
+    ) {
+      await loadProjectsForTenant(selectedTenantId.value);
+    }
+    toast.error(message);
   } finally {
     uploading.value = false;
   }
@@ -1980,7 +2034,13 @@ onUnmounted(() => {
 
                   <div class="upload-box">
                     <div class="upload-head">
-                      <p>Add Recordings</p>
+                      <div>
+                        <p>Add Recordings</p>
+                        <p class="upload-counter">
+                          Today: {{ projectDailyUploadCount }} /
+                          {{ projectDailyUploadLimit }}
+                        </p>
+                      </div>
                       <div class="upload-action-row">
                         <button
                           class="btn-ghost"
@@ -2023,9 +2083,18 @@ onUnmounted(() => {
                         :is-processing="uploading"
                         :multiple="true"
                         :disabled="
-                          !canManageJobs || !selectedBatchId || isBatchLocked
+                          !canManageJobs ||
+                          !selectedBatchId ||
+                          isBatchLocked ||
+                          isDailyUploadLimitReached
                         "
+                        :disabled-message="uploadBlockedMessage"
                         button-label="Browse Files"
+                        :disabled-button-label="
+                          isDailyUploadLimitReached
+                            ? 'Limit Reached'
+                            : 'Browse Files'
+                        "
                         @files-selected="onFilesSelected"
                       />
                     </div>
@@ -2940,6 +3009,13 @@ onUnmounted(() => {
   color: #e2e8f0;
   font-size: 0.8rem;
   font-weight: 600;
+}
+
+.upload-counter {
+  margin-top: 0.18rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
+  font-weight: 500;
 }
 
 .upload-action-row {

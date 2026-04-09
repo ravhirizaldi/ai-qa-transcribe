@@ -20,6 +20,7 @@ import {
   listProjects,
   listTenants,
   retryProjectRagDoc,
+  getAuthMeCached,
   type ProjectRagDoc,
   type ProjectRagSummary,
   type RagDocSyncStatus,
@@ -43,6 +44,7 @@ const tenants = ref<Tenant[]>([]);
 const projectsByTenant = ref<Record<string, Project[]>>({});
 const loading = ref(false);
 const errorMessage = ref("");
+const isSuperAdmin = ref(false);
 
 const showTenantModal = ref(false);
 const tenantForm = ref({ name: "", logoUrl: "" });
@@ -56,6 +58,7 @@ const projectForm = ref({
   logoUrl: "",
   callType: "inbound" as MatrixCallType,
   batchHistoryLockDays: 2,
+  dailyUploadLimit: 100,
   ceScoringPolicy: "strict_zero_all_ce_if_any_fail" as
     | "strict_zero_all_ce_if_any_fail"
     | "weighted_ce_independent",
@@ -76,6 +79,7 @@ const editProjectForm = ref({
   name: "",
   logoUrl: "",
   batchHistoryLockDays: 2,
+  dailyUploadLimit: 100,
   ceScoringPolicy: "strict_zero_all_ce_if_any_fail" as
     | "strict_zero_all_ce_if_any_fail"
     | "weighted_ce_independent",
@@ -335,6 +339,15 @@ const refreshAll = async () => {
   projectsByTenant.value = merged;
 };
 
+const loadViewerState = async () => {
+  try {
+    const me = await getAuthMeCached();
+    isSuperAdmin.value = !me.isRestricted;
+  } catch {
+    isSuperAdmin.value = false;
+  }
+};
+
 const openTenantModal = () => {
   tenantForm.value = { name: "", logoUrl: "" };
   showTenantModal.value = true;
@@ -393,6 +406,7 @@ const openProjectModal = (tenantId?: string) => {
     logoUrl: "",
     callType: "inbound",
     batchHistoryLockDays: 2,
+    dailyUploadLimit: 100,
     ceScoringPolicy: "strict_zero_all_ce_if_any_fail",
   };
   showProjectModal.value = true;
@@ -431,17 +445,25 @@ const createProjectAction = async () => {
     toast.error("Batch lock days must be at least 1 day");
     return;
   }
+  if (projectForm.value.dailyUploadLimit < 1) {
+    toast.error("Daily upload limit must be at least 1 recording");
+    return;
+  }
 
   creatingProject.value = true;
   try {
-    const project = await createProject(projectForm.value.tenantId, {
+    const payload = {
       name: projectForm.value.name.trim(),
       logoUrl: projectForm.value.logoUrl.trim() || null,
       supportsInbound: projectForm.value.callType === "inbound",
       supportsOutbound: projectForm.value.callType === "outbound",
       batchHistoryLockDays: Math.floor(projectForm.value.batchHistoryLockDays),
       ceScoringPolicy: projectForm.value.ceScoringPolicy,
-    });
+      ...(isSuperAdmin.value
+        ? { dailyUploadLimit: Math.floor(projectForm.value.dailyUploadLimit) }
+        : {}),
+    };
+    const project = await createProject(projectForm.value.tenantId, payload);
     projectsByTenant.value = {
       ...projectsByTenant.value,
       [projectForm.value.tenantId]: [
@@ -820,6 +842,7 @@ const openEditProjectModal = (project: Project) => {
     name: project.name,
     logoUrl: project.logoUrl || "",
     batchHistoryLockDays: project.batchHistoryLockDays || 2,
+    dailyUploadLimit: project.dailyUploadLimit || 100,
     ceScoringPolicy:
       project.ceScoringPolicy || "strict_zero_all_ce_if_any_fail",
   };
@@ -856,19 +879,31 @@ const saveProjectEdit = async () => {
     toast.error("Batch lock days must be at least 1 day");
     return;
   }
+  if (editProjectForm.value.dailyUploadLimit < 1) {
+    toast.error("Daily upload limit must be at least 1 recording");
+    return;
+  }
   savingProjectEdit.value = true;
   try {
+    const payload = {
+      name: editProjectForm.value.name.trim(),
+      logoUrl: editProjectForm.value.logoUrl.trim() || null,
+      batchHistoryLockDays: Math.floor(
+        editProjectForm.value.batchHistoryLockDays,
+      ),
+      ceScoringPolicy: editProjectForm.value.ceScoringPolicy,
+      ...(isSuperAdmin.value
+        ? {
+            dailyUploadLimit: Math.floor(
+              editProjectForm.value.dailyUploadLimit,
+            ),
+          }
+        : {}),
+    };
     const updated = await updateProject(
       editProjectForm.value.tenantId,
       editProjectForm.value.id,
-      {
-        name: editProjectForm.value.name.trim(),
-        logoUrl: editProjectForm.value.logoUrl.trim() || null,
-        batchHistoryLockDays: Math.floor(
-          editProjectForm.value.batchHistoryLockDays,
-        ),
-        ceScoringPolicy: editProjectForm.value.ceScoringPolicy,
-      },
+      payload,
     );
     projectsByTenant.value = {
       ...projectsByTenant.value,
@@ -1196,6 +1231,7 @@ watch(
 );
 
 onMounted(async () => {
+  await loadViewerState();
   await refreshAll();
   resetMatrixDraft();
   const tenantQuery = normalizeUuidParam(route.query.tenant);
@@ -1403,6 +1439,31 @@ onMounted(async () => {
               ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
           "
         />
+        <label class="msg-muted" for="project-daily-upload-limit">
+          Daily Upload Limit
+        </label>
+        <input
+          id="project-daily-upload-limit"
+          v-model.number="projectForm.dailyUploadLimit"
+          class="input"
+          type="number"
+          min="1"
+          max="100000"
+          step="1"
+          inputmode="numeric"
+          :disabled="!isSuperAdmin"
+          @keydown="
+            (e) =>
+              ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
+          "
+        />
+        <p class="msg-muted">
+          {{
+            isSuperAdmin
+              ? "Maximum recordings this project can accept per UTC day."
+              : "Only super admin can change the daily upload limit."
+          }}
+        </p>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showProjectModal = false">
             Cancel
@@ -1502,6 +1563,10 @@ onMounted(async () => {
                         ? "CE Weighted"
                         : "CE Strict"
                     }}
+                  </p>
+                  <p class="project-meta">
+                    Uploaded today: {{ project.dailyUploadCount }} /
+                    {{ project.dailyUploadLimit }}
                   </p>
                 </div>
               </div>
@@ -2100,6 +2165,31 @@ onMounted(async () => {
               ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
           "
         />
+        <label class="msg-muted" for="edit-project-daily-upload-limit">
+          Daily Upload Limit
+        </label>
+        <input
+          id="edit-project-daily-upload-limit"
+          v-model.number="editProjectForm.dailyUploadLimit"
+          class="input"
+          type="number"
+          min="1"
+          max="100000"
+          step="1"
+          inputmode="numeric"
+          :disabled="!isSuperAdmin"
+          @keydown="
+            (e) =>
+              ['e', 'E', '+', '-', '.'].includes(e.key) && e.preventDefault()
+          "
+        />
+        <p class="msg-muted">
+          {{
+            isSuperAdmin
+              ? "Maximum recordings this project can accept per UTC day."
+              : "Only super admin can change the daily upload limit."
+          }}
+        </p>
         <div class="modal-actions">
           <button class="btn-ghost" @click="showEditProjectModal = false">
             Cancel

@@ -30,12 +30,19 @@ import {
   assertProjectPermission,
   assertSystemPermission,
   assertTenantAccess,
+  isSuperAdminUser,
   listAccessibleProjects,
   listAccessibleTenants,
 } from "../repos/access.js";
 import { toSlug } from "../utils/slug.js";
 import { saveImageUpload } from "../storage.js";
 import { uploadRateLimit } from "../rate-limit.js";
+import {
+  DEFAULT_DAILY_UPLOAD_LIMIT,
+  listProjectDailyUploadCounts,
+  MAX_DAILY_UPLOAD_LIMIT,
+  MIN_DAILY_UPLOAD_LIMIT,
+} from "../utils/projectUploadLimits.js";
 
 const CreateTenantSchema = z.object({
   name: z.string().min(2),
@@ -53,6 +60,12 @@ const CreateProjectSchema = z.object({
   supportsInbound: z.boolean().default(true),
   supportsOutbound: z.boolean().default(false),
   batchHistoryLockDays: z.coerce.number().int().min(1).max(365).default(2),
+  dailyUploadLimit: z.coerce
+    .number()
+    .int()
+    .min(MIN_DAILY_UPLOAD_LIMIT)
+    .max(MAX_DAILY_UPLOAD_LIMIT)
+    .default(DEFAULT_DAILY_UPLOAD_LIMIT),
   ceScoringPolicy: z
     .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
     .default("strict_zero_all_ce_if_any_fail"),
@@ -64,6 +77,12 @@ const UpdateProjectSchema = z.object({
   supportsInbound: z.boolean().optional(),
   supportsOutbound: z.boolean().optional(),
   batchHistoryLockDays: z.coerce.number().int().min(1).max(365).optional(),
+  dailyUploadLimit: z.coerce
+    .number()
+    .int()
+    .min(MIN_DAILY_UPLOAD_LIMIT)
+    .max(MAX_DAILY_UPLOAD_LIMIT)
+    .optional(),
   ceScoringPolicy: z
     .enum(["strict_zero_all_ce_if_any_fail", "weighted_ce_independent"])
     .optional(),
@@ -90,9 +109,21 @@ const assertManageRole = (role: string) => {
   }
 };
 
-const XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai/v1";
-const DEFAULT_XAI_MODEL = "grok-4-1-fast-non-reasoning";
-const DEFAULT_RAG_MODEL = "grok-4-1-fast-reasoning";
+  const XAI_MANAGEMENT_BASE_URL = "https://management-api.x.ai/v1";
+  const DEFAULT_XAI_MODEL = "grok-4-1-fast-non-reasoning";
+  const DEFAULT_RAG_MODEL = "grok-4-1-fast-reasoning";
+
+  const listProjectsWithDailyUsage = async (tenantId: string, userId: string) => {
+    const accessibleProjects = await listAccessibleProjects(tenantId, userId);
+    const dailyUploadCounts = await listProjectDailyUploadCounts(
+      accessibleProjects.map((project) => project.id),
+    );
+    return accessibleProjects.map((project) => ({
+      ...project,
+      dailyUploadLimit: Number(project.dailyUploadLimit || DEFAULT_DAILY_UPLOAD_LIMIT),
+      dailyUploadCount: dailyUploadCounts[project.id] || 0,
+    }));
+  };
 
 const resolveXaiManagementKey = (settings: {
   xaiManagementApiKey?: string | null;
@@ -363,7 +394,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         .parse(request.params);
       await assertTenantAccess(params.tenantId, (request.user as any).sub);
 
-      return listAccessibleProjects(params.tenantId, (request.user as any).sub);
+      return listProjectsWithDailyUsage(params.tenantId, (request.user as any).sub);
     },
   );
 
@@ -393,6 +424,13 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ message: "Insufficient permissions" });
       }
 
+      const isSuperAdmin = await isSuperAdminUser((request.user as any).sub);
+      if (payload.dailyUploadLimit !== DEFAULT_DAILY_UPLOAD_LIMIT && !isSuperAdmin) {
+        return reply.code(403).send({
+          message: "Only super admin can change the daily upload limit.",
+        });
+      }
+
       const [project] = await db
         .insert(projects)
         .values({
@@ -403,6 +441,7 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           supportsInbound: payload.supportsInbound,
           supportsOutbound: payload.supportsOutbound,
           batchHistoryLockDays: payload.batchHistoryLockDays,
+          dailyUploadLimit: payload.dailyUploadLimit,
           ceScoringPolicy: payload.ceScoringPolicy,
         })
         .returning();
@@ -412,7 +451,11 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         userId: (request.user as any).sub,
       });
 
-      return project;
+      return {
+        ...project,
+        dailyUploadLimit: Number(project.dailyUploadLimit || DEFAULT_DAILY_UPLOAD_LIMIT),
+        dailyUploadCount: 0,
+      };
     },
   );
 
@@ -442,6 +485,15 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ message: "Insufficient permissions" });
       }
 
+      if (payload.dailyUploadLimit !== undefined) {
+        const isSuperAdmin = await isSuperAdminUser((request.user as any).sub);
+        if (!isSuperAdmin) {
+          return reply.code(403).send({
+            message: "Only super admin can change the daily upload limit.",
+          });
+        }
+      }
+
       const [updated] = await db
         .update(projects)
         .set({
@@ -463,6 +515,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
           ...(payload.batchHistoryLockDays !== undefined
             ? { batchHistoryLockDays: payload.batchHistoryLockDays }
             : {}),
+          ...(payload.dailyUploadLimit !== undefined
+            ? { dailyUploadLimit: payload.dailyUploadLimit }
+            : {}),
           ...(payload.ceScoringPolicy !== undefined
             ? { ceScoringPolicy: payload.ceScoringPolicy }
             : {}),
@@ -476,7 +531,17 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
         )
         .returning();
 
-      return updated;
+      const [dailyUploadCounts, normalizedLimit] = await Promise.all([
+        listProjectDailyUploadCounts([updated.id]),
+        Promise.resolve(
+          Number(updated.dailyUploadLimit || DEFAULT_DAILY_UPLOAD_LIMIT),
+        ),
+      ]);
+      return {
+        ...updated,
+        dailyUploadLimit: normalizedLimit,
+        dailyUploadCount: dailyUploadCounts[updated.id] || 0,
+      };
     },
   );
 

@@ -26,6 +26,10 @@ import { deleteUploadFile, saveUpload } from "../storage.js";
 import { boss, QUEUES } from "../queue.js";
 import { runWithConcurrency } from "../utils/concurrency.js";
 import { uploadRateLimit } from "../rate-limit.js";
+import {
+  DEFAULT_DAILY_UPLOAD_LIMIT,
+  getProjectDailyUploadCount,
+} from "../utils/projectUploadLimits.js";
 type CallType = "inbound" | "outbound";
 
 const ACTIVE_JOB_STATUSES = ["queued", "uploading", "transcribing", "analyzing"] as const;
@@ -55,6 +59,20 @@ const normalizeBatchName = (value: string | null | undefined) => {
   const name = String(value || "").trim();
   return name || null;
 };
+
+const cleanupPendingUploads = async (
+  files: Array<{ fileName: string; filePath: string }>,
+) => {
+  await Promise.allSettled(
+    files.map((file) => deleteUploadFile(file.filePath)),
+  );
+};
+
+const buildDailyUploadLimitMessage = (
+  limit: number,
+  uploadedToday: number,
+) =>
+  `Daily upload limit reached for this project (${uploadedToday}/${limit} recordings uploaded today).`;
 
 const normalizeBatchHistoryLockDays = (value: number | null | undefined) => {
   const days = Number(value ?? DEFAULT_BATCH_HISTORY_LOCK_DAYS);
@@ -281,85 +299,117 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     "/batches",
     { preHandler: [app.authenticate, uploadRateLimit] },
     async (request, reply) => {
-    const files: Array<{ fileName: string; filePath: string }> = [];
-    let tenantId = "";
-    let projectId = "";
-    let callType = "inbound" as CallType;
-    let batchName = "";
+      const files: Array<{ fileName: string; filePath: string }> = [];
+      let tenantId = "";
+      let projectId = "";
+      let callType = "inbound" as CallType;
+      let batchName = "";
+      let shouldCleanupFiles = true;
 
-    const parts = request.parts();
-    for await (const part of parts) {
-      if (part.type === "file") {
-        const saved = await saveUpload(part);
-        files.push(saved);
-      } else {
-        if (part.fieldname === "tenantId") tenantId = String(part.value ?? "");
-        if (part.fieldname === "projectId") projectId = String(part.value ?? "");
-        if (part.fieldname === "callType") callType = z.enum(["inbound", "outbound"]).parse(part.value);
-        if (part.fieldname === "name") batchName = String(part.value ?? "");
-      }
-    }
+      try {
+        const parts = request.parts();
+        for await (const part of parts) {
+          if (part.type === "file") {
+            const saved = await saveUpload(part);
+            files.push(saved);
+          } else {
+            if (part.fieldname === "tenantId") tenantId = String(part.value ?? "");
+            if (part.fieldname === "projectId") projectId = String(part.value ?? "");
+            if (part.fieldname === "callType")
+              callType = z.enum(["inbound", "outbound"]).parse(part.value);
+            if (part.fieldname === "name") batchName = String(part.value ?? "");
+          }
+        }
+        
+        const tenantUuid = z.string().uuid().parse(tenantId);
+        const projectUuid = z.string().uuid().parse(projectId);
 
-    const tenantUuid = z.string().uuid().parse(tenantId);
-    const projectUuid = z.string().uuid().parse(projectId);
+        if (!files.length) {
+          return reply.code(400).send({ message: "No files uploaded" });
+        }
 
-    if (!files.length) {
-      return reply.code(400).send({ message: "No files uploaded" });
-    }
+        const project = await assertProjectAccess(
+          tenantUuid,
+          projectUuid,
+          (request.user as any).sub,
+        );
+        await assertProjectPermission(
+          tenantUuid,
+          projectUuid,
+          (request.user as any).sub,
+          "jobs:manage",
+        );
 
-    const project = await assertProjectAccess(
-      tenantUuid,
-      projectUuid,
-      (request.user as any).sub,
-    );
-    await assertProjectPermission(tenantUuid, projectUuid, (request.user as any).sub, "jobs:manage");
+        const supportsCallType =
+          (callType === "inbound" && project.supportsInbound) ||
+          (callType === "outbound" && project.supportsOutbound);
+        if (!supportsCallType) {
+          return reply
+            .code(400)
+            .send({ message: "Project does not support selected call type" });
+        }
 
-    const supportsCallType =
-      (callType === "inbound" && project.supportsInbound) ||
-      (callType === "outbound" && project.supportsOutbound);
-    if (!supportsCallType) {
-      return reply.code(400).send({ message: "Project does not support selected call type" });
-    }
+        const dailyUploadLimit = Number(
+          project.dailyUploadLimit || DEFAULT_DAILY_UPLOAD_LIMIT,
+        );
+        const uploadedToday = await getProjectDailyUploadCount(projectUuid);
+        if (uploadedToday + files.length > dailyUploadLimit) {
+          await cleanupPendingUploads(files);
+          shouldCleanupFiles = false;
+          return reply.code(409).send({
+            message: buildDailyUploadLimitMessage(
+              dailyUploadLimit,
+              uploadedToday,
+            ),
+          });
+        }
 
-    const activeMatrix = await getActiveMatrixVersion(projectUuid, callType);
+        const activeMatrix = await getActiveMatrixVersion(projectUuid, callType);
 
-    const [batch] = await db
-      .insert(batches)
-      .values({
-        tenantId: tenantUuid,
-        projectId: projectUuid,
-        userId: (request.user as any).sub,
-        name: normalizeBatchName(batchName),
-        callType,
-        status: "queued",
-      })
-      .returning();
+        const [batch] = await db
+          .insert(batches)
+          .values({
+            tenantId: tenantUuid,
+            projectId: projectUuid,
+            userId: (request.user as any).sub,
+            name: normalizeBatchName(batchName),
+            callType,
+            status: "queued",
+          })
+          .returning();
 
-    const createdJobs = await db
-      .insert(jobs)
-      .values(
-        files.map((f) => ({
+        const createdJobs = await db
+          .insert(jobs)
+          .values(
+            files.map((f) => ({
+              batchId: batch.id,
+              tenantId: tenantUuid,
+              projectId: projectUuid,
+              userId: (request.user as any).sub,
+              matrixVersionId: activeMatrix.id,
+              fileName: f.fileName,
+              filePath: f.filePath,
+              callType,
+              status: "queued" as const,
+              progress: 0,
+              maxAttempts: 3,
+            })),
+          )
+          .returning();
+
+        await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
+        shouldCleanupFiles = false;
+
+        return {
           batchId: batch.id,
-          tenantId: tenantUuid,
-          projectId: projectUuid,
-          userId: (request.user as any).sub,
-          matrixVersionId: activeMatrix.id,
-          fileName: f.fileName,
-          filePath: f.filePath,
-          callType,
-          status: "queued" as const,
-          progress: 0,
-          maxAttempts: 3,
-        })),
-      )
-      .returning();
-
-    await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
-
-    return {
-      batchId: batch.id,
-      jobIds: createdJobs.map((j) => j.id),
-    };
+          jobIds: createdJobs.map((j) => j.id),
+        };
+      } catch (error) {
+        if (shouldCleanupFiles && files.length) {
+          await cleanupPendingUploads(files);
+        }
+        throw error;
+      }
     },
   );
 
@@ -367,81 +417,122 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     "/batches/:batchId/files",
     { preHandler: [app.authenticate, uploadRateLimit] },
     async (request, reply) => {
-    const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
-    const files: Array<{ fileName: string; filePath: string }> = [];
-    let analyzeNow = true;
+      const params = z.object({ batchId: z.string().uuid() }).parse(request.params);
+      const files: Array<{ fileName: string; filePath: string }> = [];
+      let analyzeNow = true;
+      let shouldCleanupFiles = true;
 
-    const batch = await db.query.batches.findFirst({ where: eq(batches.id, params.batchId) });
-    if (!batch) {
-      return reply.code(404).send({ message: "Batch not found" });
-    }
-
-    await assertProjectPermission(batch.tenantId, batch.projectId, (request.user as any).sub, "jobs:manage");
-    const project = await assertProjectAccess(batch.tenantId, batch.projectId, (request.user as any).sub);
-    const supportsCallType =
-      (batch.callType === "inbound" && project.supportsInbound) ||
-      (batch.callType === "outbound" && project.supportsOutbound);
-    if (!supportsCallType) {
-      return reply.code(400).send({ message: "Project does not support selected call type" });
-    }
-    const lockMeta = getBatchLockMeta(
-      batch.createdAt,
-      normalizeBatchHistoryLockDays(project.batchHistoryLockDays),
-    );
-    if (lockMeta.isLocked) {
-      return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
-    }
-
-    const parts = request.parts();
-    for await (const part of parts) {
-      if (part.type === "file") {
-        const saved = await saveUpload(part);
-        files.push(saved);
-      } else if (part.fieldname === "analyzeNow") {
-        analyzeNow = String(part.value ?? "true").toLowerCase() !== "false";
+      const batch = await db.query.batches.findFirst({
+        where: eq(batches.id, params.batchId),
+      });
+      if (!batch) {
+        return reply.code(404).send({ message: "Batch not found" });
       }
-    }
 
-    if (!files.length) {
-      return reply.code(400).send({ message: "No files uploaded" });
-    }
+      await assertProjectPermission(
+        batch.tenantId,
+        batch.projectId,
+        (request.user as any).sub,
+        "jobs:manage",
+      );
+      const project = await assertProjectAccess(
+        batch.tenantId,
+        batch.projectId,
+        (request.user as any).sub,
+      );
+      const supportsCallType =
+        (batch.callType === "inbound" && project.supportsInbound) ||
+        (batch.callType === "outbound" && project.supportsOutbound);
+      if (!supportsCallType) {
+        return reply
+          .code(400)
+          .send({ message: "Project does not support selected call type" });
+      }
+      const lockMeta = getBatchLockMeta(
+        batch.createdAt,
+        normalizeBatchHistoryLockDays(project.batchHistoryLockDays),
+      );
+      if (lockMeta.isLocked) {
+        return reply.code(403).send({ message: BATCH_HISTORY_LOCKED_MESSAGE });
+      }
 
-    const activeMatrix = await getActiveMatrixVersion(batch.projectId, batch.callType);
+      try {
+        const parts = request.parts();
+        for await (const part of parts) {
+          if (part.type === "file") {
+            const saved = await saveUpload(part);
+            files.push(saved);
+          } else if (part.fieldname === "analyzeNow") {
+            analyzeNow = String(part.value ?? "true").toLowerCase() !== "false";
+          }
+        }
 
-    const createdJobs = await db
-      .insert(jobs)
-      .values(
-        files.map((f) => ({
+        if (!files.length) {
+          return reply.code(400).send({ message: "No files uploaded" });
+        }
+
+        const dailyUploadLimit = Number(
+          project.dailyUploadLimit || DEFAULT_DAILY_UPLOAD_LIMIT,
+        );
+        const uploadedToday = await getProjectDailyUploadCount(batch.projectId);
+        if (uploadedToday + files.length > dailyUploadLimit) {
+          await cleanupPendingUploads(files);
+          shouldCleanupFiles = false;
+          return reply.code(409).send({
+            message: buildDailyUploadLimitMessage(
+              dailyUploadLimit,
+              uploadedToday,
+            ),
+          });
+        }
+
+        const activeMatrix = await getActiveMatrixVersion(
+          batch.projectId,
+          batch.callType,
+        );
+
+        const createdJobs = await db
+          .insert(jobs)
+          .values(
+            files.map((f) => ({
+              batchId: batch.id,
+              tenantId: batch.tenantId,
+              projectId: batch.projectId,
+              userId: (request.user as any).sub,
+              matrixVersionId: activeMatrix.id,
+              fileName: f.fileName,
+              filePath: f.filePath,
+              callType: batch.callType,
+              status: "queued" as const,
+              progress: 0,
+              maxAttempts: 3,
+            })),
+          )
+          .returning();
+
+        await db
+          .update(batches)
+          .set({ status: "queued", updatedAt: new Date() })
+          .where(eq(batches.id, batch.id));
+
+        if (analyzeNow) {
+          await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
+        }
+        shouldCleanupFiles = false;
+
+        return {
           batchId: batch.id,
-          tenantId: batch.tenantId,
-          projectId: batch.projectId,
-          userId: (request.user as any).sub,
-          matrixVersionId: activeMatrix.id,
-          fileName: f.fileName,
-          filePath: f.filePath,
-          callType: batch.callType,
-          status: "queued" as const,
-          progress: 0,
-          maxAttempts: 3,
-        })),
-      )
-      .returning();
-
-    await db
-      .update(batches)
-      .set({ status: "queued", updatedAt: new Date() })
-      .where(eq(batches.id, batch.id));
-
-    if (analyzeNow) {
-      await enqueueTranscribeJobs(createdJobs.map((job) => job.id));
-    }
-
-    return {
-      batchId: batch.id,
-      jobIds: createdJobs.map((j) => j.id),
-      analyzeNow,
-    };
-  });
+          jobIds: createdJobs.map((j) => j.id),
+          analyzeNow,
+        };
+      } catch (error) {
+        if (shouldCleanupFiles && files.length) {
+          await cleanupPendingUploads(files);
+        }
+        throw error;
+      }
+    },
+  );
 
   app.post("/batches/:batchId/analyze", { preHandler: app.authenticate }, async (request, reply) => {
     const params = z.object({ batchId: z.string().uuid() }).parse(request.params);

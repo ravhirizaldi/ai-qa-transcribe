@@ -8,11 +8,15 @@ const props = withDefaults(
     disabled?: boolean;
     multiple?: boolean;
     buttonLabel?: string;
+    disabledButtonLabel?: string;
+    disabledMessage?: string;
   }>(),
   {
     disabled: false,
     multiple: false,
     buttonLabel: "Upload Audio",
+    disabledButtonLabel: "Upload Unavailable",
+    disabledMessage: "Upload is currently unavailable",
   },
 );
 
@@ -120,7 +124,7 @@ const triggerInput = () => {
             props.isProcessing
               ? "Uploading..."
               : props.disabled
-                ? "Select a batch first"
+                ? props.disabledMessage
                 : "Drag & drop audio files here"
           }}
         </p>
@@ -129,12 +133,14 @@ const triggerInput = () => {
         </p>
       </div>
       <button
-        v-if="!props.isProcessing && !props.disabled"
+        v-if="!props.isProcessing"
         class="upload-pick-btn"
+        :class="{ 'upload-pick-btn-disabled': props.disabled }"
         type="button"
+        :disabled="props.disabled"
         @click="triggerInput"
       >
-        {{ props.buttonLabel }}
+        {{ props.disabled ? props.disabledButtonLabel : props.buttonLabel }}
       </button>
     </div>
     <p v-if="errorMsg" class="upload-error">
@@ -219,6 +225,19 @@ const triggerInput = () => {
 .upload-pick-btn:hover {
   background: rgba(34, 211, 238, 0.22);
   border-color: rgba(34, 211, 238, 0.75);
+}
+
+.upload-pick-btn-disabled,
+.upload-pick-btn:disabled {
+  cursor: not-allowed;
+  color: #94a3b8;
+  border-color: rgba(100, 116, 139, 0.4);
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.upload-pick-btn:disabled:hover {
+  background: rgba(15, 23, 42, 0.45);
+  border-color: rgba(100, 116, 139, 0.4);
 }
 
 .upload-error {
