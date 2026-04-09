@@ -4,7 +4,6 @@ import { useRoute, useRouter } from "vue-router";
 import { Mic, LayoutDashboard, Users, Settings, LogOut } from "lucide-vue-next";
 import { useSession } from "./services/session";
 import { getAuthMeCached } from "./services/backendApi";
-import AskNextoWidget from "./components/AskNextoWidget.vue";
 import { canAccessAnySettingsTab } from "./utils/settingsAccess";
 
 const route = useRoute();
@@ -154,9 +153,6 @@ watch(
     >
       <RouterView />
     </main>
-
-    <AskNextoWidget v-if="isAuthenticated && !isLoginPage" />
-
     <!-- Custom Logout Confirmation Modal -->
     <div
       v-if="showLogoutConfirm"
