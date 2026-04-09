@@ -5,6 +5,7 @@ import {
   changeSettingsUserPassword,
   createSettingsUser,
   deleteSettingsUser,
+  getAuthMeCached,
   listAccessRoles,
   listProjects,
   listSettingsUsers,
@@ -32,6 +33,7 @@ const projectsByTenant = ref<Record<string, Project[]>>({});
 const loading = ref(false);
 const saving = ref(false);
 const savingUser = ref(false);
+const canManageSuperAdmins = ref(false);
 
 const showCreateModal = ref(false);
 const showEditorModal = ref(false);
@@ -129,7 +131,12 @@ const onPickUser = (user: SettingsUser) => {
 };
 
 const openCreateModal = () => {
-  createUserForm.value = { fullname: "", email: "", password: "", isRestricted: true };
+  createUserForm.value = {
+    fullname: "",
+    email: "",
+    password: "",
+    isRestricted: true,
+  };
   showCreateModal.value = true;
 };
 
@@ -282,10 +289,12 @@ const load = async (preferredUserId?: string) => {
     const usersData = usersResult.value;
     const rolesData = rolesResult.status === "fulfilled" ? rolesResult.value : [];
     const tenantsData = tenantsResult.status === "fulfilled" ? tenantsResult.value : [];
+    const me = await getAuthMeCached();
 
     users.value = usersData;
     roles.value = rolesData;
     tenants.value = tenantsData;
+    canManageSuperAdmins.value = !me.isRestricted;
 
     if (rolesResult.status !== "fulfilled") {
       toast.error(
@@ -482,9 +491,16 @@ onMounted(() => {
             <label class="label">Initial Password</label>
             <input v-model="createUserForm.password" type="password" class="input" />
             <label class="check-row">
-              <input v-model="createUserForm.isRestricted" type="checkbox" />
+              <input
+                v-model="createUserForm.isRestricted"
+                type="checkbox"
+                :disabled="!canManageSuperAdmins"
+              />
               <span>Restricted user</span>
             </label>
+            <p v-if="!canManageSuperAdmins" class="muted tiny">
+              Restricted admins can only create restricted users.
+            </p>
           </div>
           <div class="actions modal-footer">
             <button class="btn-ghost" @click="showCreateModal = false">Cancel</button>
@@ -508,9 +524,16 @@ onMounted(() => {
             <input v-model="editEmail" class="input" placeholder="user@example.com" />
 
             <label class="check-row">
-              <input v-model="form.isRestricted" type="checkbox" />
+              <input
+                v-model="form.isRestricted"
+                type="checkbox"
+                :disabled="!canManageSuperAdmins"
+              />
               <span>Restricted user (enable role-based access)</span>
             </label>
+            <p v-if="!canManageSuperAdmins" class="muted tiny">
+              Restricted admins cannot promote users to super admin.
+            </p>
 
             <div class="row between">
               <p class="label">Role Assignments</p>

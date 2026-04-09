@@ -79,12 +79,32 @@ const normalizeFullname = (value: string | null | undefined) => {
   return name || "User";
 };
 
+const getActorUser = async (userId: string) => {
+  const actor = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+    columns: {
+      id: true,
+      isRestricted: true,
+    },
+  });
+  if (!actor) {
+    throw new Error("User not found");
+  }
+  return actor;
+};
+
 export const settingsRoutes: FastifyPluginAsync = async (app) => {
   const activeJobStatuses = new Set(["queued", "uploading", "transcribing", "analyzing"]);
 
   app.post("/settings/users", { preHandler: app.authenticate }, async (request, reply) => {
-    await assertSystemPermission((request.user as any).sub, "users:manage");
+    const actorId = (request.user as any).sub as string;
+    await assertSystemPermission(actorId, "users:manage");
     const body = CreateUserSchema.parse(request.body);
+    const actor = await getActorUser(actorId);
+
+    if (actor.isRestricted && !body.isRestricted) {
+      return reply.code(403).send({ message: "Restricted admins cannot create super admins" });
+    }
 
     const existing = await db.query.users.findFirst({ where: eq(users.email, body.email) });
     if (existing) {
@@ -112,7 +132,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/settings/users", { preHandler: app.authenticate }, async (request) => {
-    await assertSystemPermission((request.user as any).sub, "users:manage");
+    const actorId = (request.user as any).sub as string;
+    await assertSystemPermission(actorId, "users:manage");
+    const actor = await getActorUser(actorId);
 
     const [allUsers, assignmentRows, roleRows] = await Promise.all([
       db.query.users.findMany({
@@ -171,20 +193,31 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
       assignmentsByUser.set(assignment.userId, list);
     }
 
-    return allUsers.map((user) => ({
-      ...user,
-      assignments: assignmentsByUser.get(user.id) || [],
-    }));
+    return allUsers
+      .filter((user) => !actor.isRestricted || user.isRestricted)
+      .map((user) => ({
+        ...user,
+        assignments: assignmentsByUser.get(user.id) || [],
+      }));
   });
 
   app.patch("/settings/users/:userId", { preHandler: app.authenticate }, async (request, reply) => {
-    await assertSystemPermission((request.user as any).sub, "users:manage");
+    const actorId = (request.user as any).sub as string;
+    await assertSystemPermission(actorId, "users:manage");
     const params = z.object({ userId: z.string().uuid() }).parse(request.params);
     const body = UpdateUserSchema.parse(request.body);
+    const actor = await getActorUser(actorId);
 
     const existing = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
     if (!existing) {
       return reply.code(404).send({ message: "User not found" });
+    }
+
+    if (actor.isRestricted && !existing.isRestricted) {
+      return reply.code(403).send({ message: "Restricted admins cannot modify super admins" });
+    }
+    if (actor.isRestricted && body.isRestricted === false) {
+      return reply.code(403).send({ message: "Restricted admins cannot create super admins" });
     }
 
     if (body.email && body.email !== existing.email) {
@@ -219,13 +252,19 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     "/settings/users/:userId/password",
     { preHandler: app.authenticate },
     async (request, reply) => {
-      await assertSystemPermission((request.user as any).sub, "users:manage");
+      const actorId = (request.user as any).sub as string;
+      await assertSystemPermission(actorId, "users:manage");
       const params = z.object({ userId: z.string().uuid() }).parse(request.params);
       const body = UpdatePasswordSchema.parse(request.body);
+      const actor = await getActorUser(actorId);
 
       const existing = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
       if (!existing) {
         return reply.code(404).send({ message: "User not found" });
+      }
+
+      if (actor.isRestricted && !existing.isRestricted) {
+        return reply.code(403).send({ message: "Restricted admins cannot modify super admins" });
       }
 
       await db
@@ -238,9 +277,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   );
 
   app.delete("/settings/users/:userId", { preHandler: app.authenticate }, async (request, reply) => {
-    await assertSystemPermission((request.user as any).sub, "users:manage");
-    const params = z.object({ userId: z.string().uuid() }).parse(request.params);
     const actorId = (request.user as any).sub as string;
+    await assertSystemPermission(actorId, "users:manage");
+    const params = z.object({ userId: z.string().uuid() }).parse(request.params);
+    const actor = await getActorUser(actorId);
 
     if (params.userId === actorId) {
       return reply.code(400).send({ message: "You cannot delete your own account" });
@@ -249,6 +289,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     const existing = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
     if (!existing) {
       return reply.code(404).send({ message: "User not found" });
+    }
+
+    if (actor.isRestricted && !existing.isRestricted) {
+      return reply.code(403).send({ message: "Restricted admins cannot delete super admins" });
     }
 
     const [jobRef, tenantRef] = await Promise.all([
@@ -272,7 +316,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.put("/settings/users/:userId/access", { preHandler: app.authenticate }, async (request, reply) => {
-    await assertSystemPermission((request.user as any).sub, "users:manage");
+    const actorId = (request.user as any).sub as string;
+    await assertSystemPermission(actorId, "users:manage");
+    const actor = await getActorUser(actorId);
 
     const params = z.object({ userId: z.string().uuid() }).parse(request.params);
     const body = UserAccessSchema.parse(request.body);
@@ -289,6 +335,13 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     const target = await db.query.users.findFirst({ where: eq(users.id, params.userId) });
     if (!target) {
       return reply.code(404).send({ message: "User not found" });
+    }
+
+    if (actor.isRestricted && !target.isRestricted) {
+      return reply.code(403).send({ message: "Restricted admins cannot modify super admins" });
+    }
+    if (actor.isRestricted && !body.isRestricted) {
+      return reply.code(403).send({ message: "Restricted admins cannot create super admins" });
     }
 
     const roleIds = [...new Set(body.assignments.map((assignment) => assignment.roleId))];
