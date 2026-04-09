@@ -8,7 +8,7 @@ import {
   projectMatrixVersions,
   projects,
 } from "../../drizzle/schema.js";
-import { assertProjectPermission, assertTenantAccess } from "../repos/access.js";
+import { assertProjectPermission } from "../repos/access.js";
 
 const MatrixRowsSchema = z.array(
   z.object({
@@ -20,13 +20,6 @@ const MatrixRowsSchema = z.array(
 );
 
 export const matrixRoutes: FastifyPluginAsync = async (app) => {
-  const assertTenantMatrixManageAccess = async (tenantId: string, userId: string) => {
-    const membership = await assertTenantAccess(tenantId, userId, { requireMembership: true });
-    if (!membership || !["owner", "admin"].includes(membership.role)) {
-      throw new Error("Insufficient permissions");
-    }
-  };
-
   const getProjectForMatrix = async (projectId: string, callType: "inbound" | "outbound") => {
     const project = await db.query.projects.findFirst({ where: eq(projects.id, projectId) });
     if (!project) throw new Error("Project not found");
@@ -73,7 +66,6 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
       await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
-      await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const [current] = await db
         .select({ maxVersion: sql<number>`COALESCE(MAX(${projectMatrixVersions.versionNumber}), 0)` })
@@ -125,7 +117,6 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
       await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
-      await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({
         where: and(
@@ -254,7 +245,6 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
       await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
-      await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({
         where: and(
@@ -300,7 +290,6 @@ export const matrixRoutes: FastifyPluginAsync = async (app) => {
 
       const project = await getProjectForMatrix(params.projectId, params.callType);
       await assertProjectPermission(project.tenantId, project.id, (request.user as any).sub, "matrices:manage");
-      await assertTenantMatrixManageAccess(project.tenantId, (request.user as any).sub);
 
       const version = await db.query.projectMatrixVersions.findFirst({
         where: and(
