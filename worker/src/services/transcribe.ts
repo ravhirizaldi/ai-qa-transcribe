@@ -1,9 +1,17 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
-import ivrFiltersConfig from "../data/ivr_filters.json";
 import { logProviderError, logProviderEvent } from "./providerLogs.js";
 
-const ivrFilters = Object.values(ivrFiltersConfig).flat() as string[];
+type IvrFiltersConfig = Record<string, string[]>;
+
+const ivrFiltersConfigPath = fileURLToPath(
+  new URL("../data/ivr_filters.json", import.meta.url),
+);
+const ivrFiltersConfig = JSON.parse(
+  readFileSync(ivrFiltersConfigPath, "utf-8"),
+) as IvrFiltersConfig;
+const ivrFilters = Object.values(ivrFiltersConfig).flat();
 const ivrFilterRegexes = ivrFilters.map(
   (phrase) =>
     new RegExp(
