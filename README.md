@@ -154,7 +154,7 @@ pnpm -r build
 The repo now includes a production Docker stack with:
 
 - optional `db`: PostgreSQL
-- `migrate`: auto `drizzle:generate` + `drizzle:migrate`
+- `migrate`: auto `drizzle:migrate`
 - `backend`: Fastify API
 - `worker`: pg-boss worker
 - `frontend`: Nginx serving the Vue build and proxying `/api`, `/ws`, and `/uploads`
@@ -183,6 +183,8 @@ Important values to review:
   host port for the web app
 - `REMOVE_MIGRATE_IMAGE_AFTER_RUN`
   when `true`, the temporary migrate image is deleted automatically after a successful install/update
+- `GENERATE_MIGRATIONS_ON_DEPLOY`
+  defaults to `false`; leave it off for production deploys so the container only applies committed migrations
 
 ### First Install
 
@@ -196,7 +198,7 @@ What it does:
 
 - builds the Docker images
 - starts PostgreSQL
-- runs Drizzle generation and migrations automatically
+- runs Drizzle migrations automatically
 - starts backend, worker, and frontend
 
 ### Updating an Existing Deployment
@@ -211,7 +213,7 @@ What it does:
 
 - pulls the latest git changes with `git pull --ff-only`
 - rebuilds the images
-- reruns Drizzle generation and migrations
+- reruns Drizzle migrations
 - recreates the app containers
 
 ### Manual Docker Compose
