@@ -1,0 +1,62 @@
+name: ai-qa-transcribe
+
+x-app-service: &app-service
+  image: ai-qa-transcribe-app:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.app
+  env_file:
+    - ./.env.production
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  migrate:
+    <<: *app-service
+    command: ["sh", "/app/docker/migrate.sh"]
+    restart: "no"
+
+  backend:
+    <<: *app-service
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["sh", "/app/docker/backend-start.sh"]
+    restart: unless-stopped
+    volumes:
+      - uploads:/app/backend/uploads
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:3001/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  worker:
+    <<: *app-service
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["sh", "/app/docker/worker-start.sh"]
+    restart: unless-stopped
+    volumes:
+      - uploads:/app/backend/uploads
+
+  frontend:
+    image: ai-qa-transcribe-frontend:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    env_file:
+      - ./.env.production
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${PUBLIC_APP_PORT:-80}:80"
+    restart: unless-stopped
+
+volumes:
+  uploads:

@@ -1,0 +1,13 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+backend/dist
+frontend/dist
+worker/dist
+backend/.env
+worker/.env
+frontend/.env
+.env
+.env.production
+

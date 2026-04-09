@@ -148,3 +148,76 @@ Build all workspaces:
 ```bash
 pnpm -r build
 ```
+
+## Production Docker
+
+The repo now includes a production Docker stack with:
+
+- optional `db`: PostgreSQL
+- `migrate`: auto `drizzle:generate` + `drizzle:migrate`
+- `backend`: Fastify API
+- `worker`: pg-boss worker
+- `frontend`: Nginx serving the Vue build and proxying `/api`, `/ws`, and `/uploads`
+
+### Production Env
+
+Create a production env file at the repo root:
+
+```bash
+cp .env.production.example .env.production
+```
+
+Important values to review:
+
+- `USE_DOCKER_POSTGRES`
+  set `true` to run PostgreSQL in Docker, `false` to use an existing PostgreSQL server
+- `JWT_SECRET`
+- `POSTGRES_PASSWORD`
+  only required when `USE_DOCKER_POSTGRES=true`
+- `DATABASE_URL`
+  use `db` when `USE_DOCKER_POSTGRES=true`
+  if PostgreSQL is already installed on the same Linux host, use `host.docker.internal` instead of `localhost`
+- `CORS_ORIGIN`
+  set this to the public URL that serves the frontend
+- `PUBLIC_APP_PORT`
+  host port for the web app
+
+### First Install
+
+On Linux:
+
+```bash
+./install.sh
+```
+
+What it does:
+
+- builds the Docker images
+- starts PostgreSQL
+- runs Drizzle generation and migrations automatically
+- starts backend, worker, and frontend
+
+### Updating an Existing Deployment
+
+On Linux:
+
+```bash
+./update.sh
+```
+
+What it does:
+
+- pulls the latest git changes with `git pull --ff-only`
+- rebuilds the images
+- reruns Drizzle generation and migrations
+- recreates the app containers
+
+### Manual Docker Compose
+
+If you want to run it directly without the helper scripts:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+```
+
+Frontend is exposed on `http://localhost:<PUBLIC_APP_PORT>`.
