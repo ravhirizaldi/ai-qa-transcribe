@@ -460,7 +460,7 @@ export const assertProjectPermission = async (
   userId: string,
   permission: PermissionKey,
 ) => {
-  await assertTenantAccess(tenantId, userId);
+  const tenantAccess = await assertTenantAccess(tenantId, userId);
   const project = await db.query.projects.findFirst({
     where: and(eq(projects.id, projectId), eq(projects.tenantId, tenantId)),
     columns: { id: true },
@@ -471,6 +471,9 @@ export const assertProjectPermission = async (
 
   const user = await getUser(userId);
   if (!user.isRestricted) return;
+  if (tenantAccess && ["owner", "admin"].includes(tenantAccess.role)) {
+    return;
+  }
 
   const assignments = await getParsedRoleAssignments(userId);
   const allowed = await hasScopedProjectPermission(assignments, tenantId, projectId, permission);
