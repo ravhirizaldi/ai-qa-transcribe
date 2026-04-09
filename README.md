@@ -181,6 +181,8 @@ Important values to review:
   set this to the public URL that serves the frontend
 - `PUBLIC_APP_PORT`
   host port for the web app
+- `REMOVE_MIGRATE_IMAGE_AFTER_RUN`
+  when `true`, the temporary migrate image is deleted automatically after a successful install/update
 
 ### First Install
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
-cd /app
+cd /app/backend
 
 echo "[migrate] generating drizzle artifacts"
-pnpm --filter @ai-transcript/backend drizzle:generate
+./node_modules/.bin/drizzle-kit generate
 
 attempt=1
 max_attempts="${DB_WAIT_MAX_ATTEMPTS:-30}"
 sleep_seconds="${DB_WAIT_INTERVAL_SECONDS:-3}"
 
-until pnpm --filter @ai-transcript/backend drizzle:migrate; do
+until ./node_modules/.bin/drizzle-kit migrate; do
   if [ "$attempt" -ge "$max_attempts" ]; then
     echo "[migrate] database migration failed after ${attempt} attempts"
     exit 1
@@ -22,4 +22,3 @@ until pnpm --filter @ai-transcript/backend drizzle:migrate; do
 done
 
 echo "[migrate] migration completed"
-

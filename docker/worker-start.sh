@@ -2,5 +2,4 @@
 set -eu
 
 cd /app
-exec pnpm --filter @ai-transcript/worker start
-
+exec node /app/worker/dist/worker.js

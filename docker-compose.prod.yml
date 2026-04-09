@@ -5,6 +5,18 @@ x-app-service: &app-service
   build:
     context: .
     dockerfile: docker/Dockerfile.app
+    target: app-runtime
+  env_file:
+    - ./.env.production
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-migrate-service: &migrate-service
+  image: ai-qa-transcribe-migrate:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.app
+    target: migrate-runtime
   env_file:
     - ./.env.production
   extra_hosts:
@@ -12,7 +24,7 @@ x-app-service: &app-service
 
 services:
   migrate:
-    <<: *app-service
+    <<: *migrate-service
     command: ["sh", "/app/docker/migrate.sh"]
     restart: "no"
 

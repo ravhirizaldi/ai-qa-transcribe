@@ -2,5 +2,4 @@
 set -eu
 
 cd /app
-exec pnpm --filter @ai-transcript/backend start
-
+exec node /app/backend/dist/src/server.js

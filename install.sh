@@ -12,6 +12,14 @@ require_command() {
   fi
 }
 
+cleanup_migrate_image() {
+  case "${REMOVE_MIGRATE_IMAGE_AFTER_RUN:-true}" in
+    true|TRUE|1|yes|YES)
+      docker image rm ai-qa-transcribe-migrate:latest >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
 validate_env() {
   set -a
   # shellcheck disable=SC1090
@@ -99,4 +107,5 @@ if [[ "${USE_DOCKER_POSTGRES:-true}" == "true" ]]; then
 fi
 docker compose "${compose_args[@]}" run --rm migrate
 docker compose "${compose_args[@]}" up -d backend worker frontend
+cleanup_migrate_image
 docker compose "${compose_args[@]}" ps
