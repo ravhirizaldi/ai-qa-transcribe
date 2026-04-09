@@ -37,6 +37,7 @@ const canManageSuperAdmins = ref(false);
 
 const showCreateModal = ref(false);
 const showEditorModal = ref(false);
+const showDeleteConfirm = ref(false);
 
 const createUserForm = ref({
   fullname: "",
@@ -145,6 +146,16 @@ const openEditorModal = (user: SettingsUser) => {
   showEditorModal.value = true;
 };
 
+const openDeleteConfirm = () => {
+  if (!selectedUser.value) return;
+  showDeleteConfirm.value = true;
+};
+
+const closeDeleteConfirm = () => {
+  if (savingUser.value) return;
+  showDeleteConfirm.value = false;
+};
+
 const createUser = async () => {
   if (!createUserForm.value.email.trim()) {
     toast.error("Email is required");
@@ -179,12 +190,12 @@ const createUser = async () => {
 
 const removeUser = async () => {
   if (!selectedUser.value) return;
-  if (!confirm(`Delete user "${selectedUser.value.email}"?`)) return;
 
   savingUser.value = true;
   try {
     await deleteSettingsUser(selectedUser.value.id);
     toast.success("User deleted");
+    showDeleteConfirm.value = false;
     showEditorModal.value = false;
     selectedUserId.value = "";
     await load();
@@ -601,7 +612,36 @@ onMounted(() => {
             <button class="btn-primary" :disabled="saving" @click="save">
               {{ saving ? "Saving..." : "Save" }}
             </button>
-            <button class="danger-btn" :disabled="savingUser" @click="removeUser">Delete User</button>
+            <button class="danger-btn" :disabled="savingUser" @click="openDeleteConfirm">
+              Delete User
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="showDeleteConfirm && selectedUser"
+        class="overlay"
+        @click.self="closeDeleteConfirm"
+      >
+        <div class="modal-card">
+          <div class="modal-header">
+            <h3 class="subtitle">Delete User</h3>
+          </div>
+          <div class="modal-body">
+            <p class="muted">
+              Delete user "{{ selectedUser.email }}"? This action cannot be undone.
+            </p>
+          </div>
+          <div class="actions modal-footer">
+            <button class="btn-ghost" :disabled="savingUser" @click="closeDeleteConfirm">
+              Cancel
+            </button>
+            <button class="danger-btn" :disabled="savingUser" @click="removeUser">
+              {{ savingUser ? "Deleting..." : "Delete User" }}
+            </button>
           </div>
         </div>
       </div>

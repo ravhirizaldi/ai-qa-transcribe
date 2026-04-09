@@ -143,6 +143,7 @@ let hasStableWsConnection = false;
 let selectedJobAudioAbortController: AbortController | null = null;
 let selectedJobAudioRequestId = 0;
 let suppressSelectedJobWatcher = false;
+const jobFailureAlerts = new Map<string, string>();
 const JOB_HYDRATION_CONCURRENCY = 5;
 const hydratingJobIds = new Set<string>();
 
@@ -254,6 +255,13 @@ const selectedJobMeta = computed(
     selectedBatchJobs.value.find((job) => job.id === selectedJobId.value) ||
     null,
 );
+const normalizeJobErrorMessage = (message?: string | null) =>
+  String(message || "").replace(/\s+/g, " ").trim();
+const getJobFailurePreview = (job: { errorMessage?: string | null }) => {
+  const message = normalizeJobErrorMessage(job.errorMessage);
+  if (!message) return "Processing failed.";
+  return message.length > 140 ? `${message.slice(0, 137)}...` : message;
+};
 const transcriptSegments = computed(() => {
   const segments = selectedJobDetail.value?.segments || [];
   return toTranscriptSegments(segments as any[]);
@@ -693,6 +701,7 @@ const applyRealtimeEvent = (event: Record<string, unknown>) => {
   if (isRealtimeJobEvent(eventType)) {
     const jobId = String(event.jobId || "");
     if (!jobId) return false;
+    const currentJob = batchDetails.value.jobs.find((job) => job.id === jobId);
 
     const nextStatus =
       typeof event.status === "string" && event.status.trim()
@@ -732,6 +741,19 @@ const applyRealtimeEvent = (event: Record<string, unknown>) => {
           ? { errorMessage: nextErrorMessage }
           : {}),
       };
+    }
+
+    if (nextStatus === "failed") {
+      const jobName = currentJob?.fileName || "Recording";
+      const failureMessage =
+        normalizeJobErrorMessage(nextErrorMessage) || "Processing failed.";
+      const alertKey = `${jobName}:${failureMessage}`;
+      if (jobFailureAlerts.get(jobId) !== alertKey) {
+        toast.error(`${jobName}: ${failureMessage}`);
+        jobFailureAlerts.set(jobId, alertKey);
+      }
+    } else if (nextStatus) {
+      jobFailureAlerts.delete(jobId);
     }
 
     if (nextStatus === "completed") {
@@ -823,6 +845,9 @@ const loadSelectedJobDetail = async (opts?: {
   try {
     selectedJobDetail.value = await getJob(selectedJobId.value);
   } catch (error) {
+    if (!opts?.keepContent) {
+      selectedJobDetail.value = null;
+    }
     if (!opts?.silent) {
       toast.error(
         error instanceof Error
@@ -2016,7 +2041,16 @@ onUnmounted(() => {
                         v-for="job in pagedBatchJobs"
                         :key="job.id"
                         class="job-row"
-                        :class="{ 'job-row-active': selectedJobId === job.id }"
+                        :class="{
+                          'job-row-active': selectedJobId === job.id,
+                          'job-row-failed': job.status === 'failed',
+                        }"
+                        :title="
+                          job.status === 'failed'
+                            ? normalizeJobErrorMessage(job.errorMessage) ||
+                              'Processing failed.'
+                            : ''
+                        "
                         @click="selectedJobId = job.id"
                       >
                         <div class="job-main">
@@ -2024,6 +2058,12 @@ onUnmounted(() => {
                           <span class="job-meta"
                             >{{ job.status }} ({{ job.progress }}%)</span
                           >
+                          <p
+                            v-if="job.status === 'failed'"
+                            class="job-error"
+                          >
+                            {{ getJobFailurePreview(job) }}
+                          </p>
                           <div class="job-progress">
                             <div
                               class="job-progress-fill"
@@ -2859,6 +2899,16 @@ onUnmounted(() => {
   font-size: 0.7rem;
 }
 
+.job-error {
+  color: #fecdd3;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
 .input {
   width: 100%;
   border-radius: 0.58rem;
@@ -2982,6 +3032,11 @@ onUnmounted(() => {
 .job-row-active {
   border-color: rgba(34, 211, 238, 0.68);
   box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.3);
+}
+
+.job-row-failed {
+  border-color: rgba(244, 63, 94, 0.42);
+  background: rgba(76, 5, 25, 0.18);
 }
 
 .job-main {

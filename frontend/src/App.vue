@@ -2,6 +2,7 @@
 import { ref, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Mic, LayoutDashboard, Users, Settings, LogOut } from "lucide-vue-next";
+import { Toaster } from "vue-sonner";
 import { useSession } from "./services/session";
 import { getAuthMeCached } from "./services/backendApi";
 import { canAccessAnySettingsTab } from "./utils/settingsAccess";
@@ -153,6 +154,12 @@ watch(
     >
       <RouterView />
     </main>
+    <Toaster
+      theme="dark"
+      position="top-right"
+      rich-colors
+      close-button
+    />
     <!-- Custom Logout Confirmation Modal -->
     <div
       v-if="showLogoutConfirm"

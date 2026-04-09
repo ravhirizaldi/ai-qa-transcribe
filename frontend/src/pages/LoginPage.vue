@@ -10,6 +10,7 @@ const { setToken } = useSession();
 
 const email = ref("");
 const password = ref("");
+const rememberMe = ref(true);
 const mode = ref<"login" | "register">("login");
 const canRegister = ref(false);
 const isSubmitting = ref(false);
@@ -65,7 +66,9 @@ const submit = async () => {
         ? await login(email.value, password.value)
         : await register(email.value, password.value);
 
-    setToken(response.token);
+    setToken(response.token, {
+      remember: mode.value === "login" ? rememberMe.value : true,
+    });
     toast.success(mode.value === "login" ? "Logged in" : "Account created");
     await router.push("/batch");
   } catch (error) {
@@ -83,6 +86,9 @@ const unlockInputs = () => {
 const toggleMode = () => {
   mode.value = mode.value === "login" ? "register" : "login";
   authError.value = "";
+  if (mode.value === "register") {
+    rememberMe.value = true;
+  }
 };
 
 onMounted(async () => {
@@ -166,6 +172,18 @@ onMounted(async () => {
           @focus="unlockInputs"
           class="w-full rounded-xl border border-slate-700/70 bg-slate-900/55 px-3 py-2.5 text-slate-100"
         />
+
+        <label
+          v-if="mode === 'login'"
+          class="flex items-center gap-3 rounded-xl border border-slate-800/80 bg-slate-900/40 px-3 py-2 text-sm text-slate-200"
+        >
+          <input
+            v-model="rememberMe"
+            type="checkbox"
+            class="h-4 w-4 rounded border-slate-600 bg-slate-950 text-cyan-400 focus:ring-cyan-400"
+          />
+          <span>Remember me on this device</span>
+        </label>
 
         <button
           type="submit"

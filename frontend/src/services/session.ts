@@ -1,28 +1,71 @@
 import { ref } from "vue";
 import { clearAuthMeCache } from "./backendApi";
 
-const tokenRef = ref<string>(localStorage.getItem("qa_token") || "");
-const tenantIdRef = ref<string>(localStorage.getItem("qa_tenant_id") || "");
-const projectIdRef = ref<string>(localStorage.getItem("qa_project_id") || "");
+const TOKEN_KEY = "qa_token";
+const TENANT_KEY = "qa_tenant_id";
+const PROJECT_KEY = "qa_project_id";
+const REMEMBER_KEY = "qa_remember_me";
+
+const readStorage = (key: string) =>
+  localStorage.getItem(key) || sessionStorage.getItem(key) || "";
+
+const removeFromAllStorage = (key: string) => {
+  localStorage.removeItem(key);
+  sessionStorage.removeItem(key);
+};
+
+const tokenRef = ref<string>(readStorage(TOKEN_KEY));
+const tenantIdRef = ref<string>(readStorage(TENANT_KEY));
+const projectIdRef = ref<string>(readStorage(PROJECT_KEY));
 
 export const useSession = () => {
-  const setToken = (token: string) => {
+  const isRemembered = () => localStorage.getItem(REMEMBER_KEY) === "true";
+
+  const setToken = (token: string, opts?: { remember?: boolean }) => {
     clearAuthMeCache();
     tokenRef.value = token;
-    if (token) localStorage.setItem("qa_token", token);
-    else localStorage.removeItem("qa_token");
+    if (token) {
+      const remember = opts?.remember ?? isRemembered();
+      removeFromAllStorage(TOKEN_KEY);
+      if (remember) {
+        localStorage.setItem(TOKEN_KEY, token);
+        localStorage.setItem(REMEMBER_KEY, "true");
+      } else {
+        sessionStorage.setItem(TOKEN_KEY, token);
+        localStorage.removeItem(REMEMBER_KEY);
+      }
+    } else {
+      removeFromAllStorage(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_KEY);
+    }
   };
 
   const setTenantId = (tenantId: string) => {
     tenantIdRef.value = tenantId;
-    if (tenantId) localStorage.setItem("qa_tenant_id", tenantId);
-    else localStorage.removeItem("qa_tenant_id");
+    if (tenantId) {
+      removeFromAllStorage(TENANT_KEY);
+      if (isRemembered()) {
+        localStorage.setItem(TENANT_KEY, tenantId);
+      } else {
+        sessionStorage.setItem(TENANT_KEY, tenantId);
+      }
+    } else {
+      removeFromAllStorage(TENANT_KEY);
+    }
   };
 
   const setProjectId = (projectId: string) => {
     projectIdRef.value = projectId;
-    if (projectId) localStorage.setItem("qa_project_id", projectId);
-    else localStorage.removeItem("qa_project_id");
+    if (projectId) {
+      removeFromAllStorage(PROJECT_KEY);
+      if (isRemembered()) {
+        localStorage.setItem(PROJECT_KEY, projectId);
+      } else {
+        sessionStorage.setItem(PROJECT_KEY, projectId);
+      }
+    } else {
+      removeFromAllStorage(PROJECT_KEY);
+    }
   };
 
   const clear = () => {

@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router";
+import { toast } from "vue-sonner";
 import { getAuthMeCached } from "../services/backendApi";
 import {
   canAccessAnySettingsTab,
@@ -53,7 +54,8 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const isPublic = Boolean(to.meta.public);
-  const token = localStorage.getItem("qa_token");
+  const token =
+    localStorage.getItem("qa_token") || sessionStorage.getItem("qa_token");
 
   if (!isPublic && !token) {
     return "/login";
@@ -73,16 +75,24 @@ router.beforeEach(async (to) => {
 
       if (to.path.startsWith("/settings")) {
         if (!canAccessAnySettingsTab(permissions)) {
+          toast.error("You do not have access to settings.");
           return "/batch";
         }
         if (!canAccessSettingsPath(to.path, permissions)) {
+          toast.error("You do not have access to this settings page.");
           return getDefaultSettingsPath(permissions);
         }
       }
       if (to.path.startsWith("/manage") && !canAccessManageFromPermissions(permissions)) {
+        toast.error("You do not have access to tenant and project management.");
         return "/batch";
       }
-    } catch {
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Unable to verify your access. Redirected to QA Calculation.",
+      );
       return "/batch";
     }
   }

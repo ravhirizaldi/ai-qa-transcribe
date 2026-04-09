@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
+import { toast } from "vue-sonner";
 import { getAuthMeCached } from "../../services/backendApi";
 import {
   SETTINGS_TABS,
@@ -20,8 +21,13 @@ const loadTabs = async () => {
     tabs.value = me.isRestricted
       ? getAccessibleSettingsTabs(toPermissionSet(me.permissions))
       : SETTINGS_TABS;
-  } catch {
+  } catch (error) {
     tabs.value = [];
+    toast.error(
+      error instanceof Error
+        ? error.message
+        : "Unable to refresh settings access. Redirected to QA Calculation.",
+    );
   }
 
   if (!tabs.value.length) {

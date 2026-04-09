@@ -3,7 +3,8 @@ const WS_BASE =
   import.meta.env.VITE_WS_URL ||
   `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 
-const getToken = () => localStorage.getItem("qa_token") || "";
+const getToken = () =>
+  localStorage.getItem("qa_token") || sessionStorage.getItem("qa_token") || "";
 
 const withAuth = (headers: Record<string, string> = {}) => {
   const token = getToken();
