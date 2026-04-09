@@ -112,7 +112,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/settings/users", { preHandler: app.authenticate }, async (request) => {
-    await assertSystemPermission((request.user as any).sub, "settings:view");
+    await assertSystemPermission((request.user as any).sub, "users:manage");
 
     const [allUsers, assignmentRows, roleRows] = await Promise.all([
       db.query.users.findMany({
@@ -335,7 +335,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/settings/roles", { preHandler: app.authenticate }, async (request) => {
-    await assertSystemPermission((request.user as any).sub, "settings:view");
+    await assertSystemPermission((request.user as any).sub, "roles:manage");
 
     const roles = await db
       .select({
@@ -447,7 +447,7 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
   });
 
   app.get("/settings/system", { preHandler: app.authenticate }, async (request) => {
-    await assertSystemPermission((request.user as any).sub, "settings:view");
+    await assertSystemPermission((request.user as any).sub, "system:manage");
     const settings = await db.query.globalProviderSettings.findFirst({
       orderBy: (t, { desc }) => [desc(t.updatedAt)],
     });

@@ -5,6 +5,7 @@ import { Mic, LayoutDashboard, Users, Settings, LogOut } from "lucide-vue-next";
 import { useSession } from "./services/session";
 import { getAuthMeCached } from "./services/backendApi";
 import AskNextoWidget from "./components/AskNextoWidget.vue";
+import { canAccessAnySettingsTab } from "./utils/settingsAccess";
 
 const route = useRoute();
 const router = useRouter();
@@ -45,12 +46,7 @@ const refreshSettingsAccess = async () => {
     }
 
     const permissionSet = new Set(me.permissions);
-    canAccessSettings.value =
-      permissionSet.has("settings:view") ||
-      permissionSet.has("settings:manage") ||
-      permissionSet.has("users:manage") ||
-      permissionSet.has("roles:manage") ||
-      permissionSet.has("system:manage");
+    canAccessSettings.value = canAccessAnySettingsTab(permissionSet);
 
     canAccessManage.value =
       permissionSet.has("tenants:view") ||

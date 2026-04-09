@@ -1,11 +1,46 @@
 <script setup lang="ts">
-import { RouterLink } from "vue-router";
+import { computed, onMounted, ref } from "vue";
+import { RouterLink, useRoute, useRouter } from "vue-router";
+import { getAuthMeCached } from "../../services/backendApi";
+import {
+  SETTINGS_TABS,
+  getAccessibleSettingsTabs,
+  toPermissionSet,
+} from "../../utils/settingsAccess";
 
-const tabs = [
-  { to: "/settings/users", label: "Users" },
-  { to: "/settings/roles", label: "Roles" },
-  { to: "/settings/system", label: "System" },
-];
+const route = useRoute();
+const router = useRouter();
+const tabs = ref(SETTINGS_TABS);
+
+const visibleTabs = computed(() => tabs.value);
+
+const loadTabs = async () => {
+  try {
+    const me = await getAuthMeCached({ force: true });
+    tabs.value = me.isRestricted
+      ? getAccessibleSettingsTabs(toPermissionSet(me.permissions))
+      : SETTINGS_TABS;
+  } catch {
+    tabs.value = [];
+  }
+
+  if (!tabs.value.length) {
+    await router.replace("/batch");
+    return;
+  }
+
+  const canAccessCurrentPath = tabs.value.some(
+    (tab) => route.path === tab.to || route.path.startsWith(`${tab.to}/`),
+  );
+
+  if (!canAccessCurrentPath) {
+    await router.replace(tabs.value[0]?.to ?? "/batch");
+  }
+};
+
+onMounted(() => {
+  void loadTabs();
+});
 </script>
 
 <template>
@@ -18,7 +53,7 @@ const tabs = [
 
     <nav class="tabs">
       <RouterLink
-        v-for="tab in tabs"
+        v-for="tab in visibleTabs"
         :key="tab.to"
         :to="tab.to"
         class="tab"

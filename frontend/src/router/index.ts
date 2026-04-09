@@ -1,5 +1,11 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { getAuthMeCached } from "../services/backendApi";
+import {
+  canAccessAnySettingsTab,
+  canAccessSettingsPath,
+  getDefaultSettingsPath,
+  toPermissionSet,
+} from "../utils/settingsAccess";
 
 const canAccessManageFromPermissions = (permissions: Set<string>) => {
   return (
@@ -9,16 +15,6 @@ const canAccessManageFromPermissions = (permissions: Set<string>) => {
     permissions.has("projects:manage") ||
     permissions.has("matrices:view") ||
     permissions.has("matrices:manage")
-  );
-};
-
-const canAccessSettingsFromPermissions = (permissions: Set<string>) => {
-  return (
-    permissions.has("settings:view") ||
-    permissions.has("settings:manage") ||
-    permissions.has("users:manage") ||
-    permissions.has("roles:manage") ||
-    permissions.has("system:manage")
   );
 };
 
@@ -71,16 +67,17 @@ router.beforeEach(async (to) => {
     try {
       const me = await getAuthMeCached();
       const isRestricted = me.isRestricted === true;
-      const permissions = new Set(
-        Array.isArray(me.permissions)
-          ? me.permissions.filter((value): value is string => typeof value === "string")
-          : [],
-      );
+      const permissions = toPermissionSet(me.permissions);
 
       if (!isRestricted) return true;
 
-      if (to.path.startsWith("/settings") && !canAccessSettingsFromPermissions(permissions)) {
-        return "/batch";
+      if (to.path.startsWith("/settings")) {
+        if (!canAccessAnySettingsTab(permissions)) {
+          return "/batch";
+        }
+        if (!canAccessSettingsPath(to.path, permissions)) {
+          return getDefaultSettingsPath(permissions);
+        }
       }
       if (to.path.startsWith("/manage") && !canAccessManageFromPermissions(permissions)) {
         return "/batch";
